@@ -1,0 +1,52 @@
+{
+  "corpora": [
+    {
+      "id": "beir-nfcorpus",
+      "name": "BEIR NF-Corpus (Medical, 3633 docs)",
+      "source": "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/nfcorpus.zip",
+      "format": "jsonl",
+      "size": 3633,
+      "description": "Nutrition facts retrieval corpus, standard RAG benchmark"
+    },
+    {
+      "id": "beir-scifact",
+      "name": "BEIR SciFact (1.4k docs)",
+      "source": "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip",
+      "format": "jsonl",
+      "size": 5183,
+      "description": "Scientific claim verification"
+    },
+    {
+      "id": "supabase-docs",
+      "name": "Supabase Docs (200 markdown files)",
+      "source": "https://api.github.com/repos/supabase/supabase/contents/apps/docs/content?per_page=100",
+      "format": "markdown",
+      "size": 200,
+      "description": "Real markdown docs from supabase/supabase"
+    },
+    {
+      "id": "wikipedia-100",
+      "name": "Wikipedia Random 100",
+      "source": "https://en.wikipedia.org/w/api.php?action=query&generator=random&grnnamespace=0&grnlimit=10&prop=extracts&explaintext&format=json",
+      "format": "markdown",
+      "size": 100,
+      "description": "Random Wikipedia articles via API, converted to markdown"
+    },
+    {
+      "id": "msmarco-mini",
+      "name": "MS MARCO Mini (1000 passages)",
+      "source": "https://microsoft.github.io/msmarco/",
+      "format": "tsv",
+      "size": 1000,
+      "description": "Classic passage ranking dataset"
+    },
+    {
+      "id": "synthetic-300",
+      "name": "Synthetic Bulk 300 (local, no web)",
+      "source": "local://synthetic",
+      "format": "markdown",
+      "size": 300,
+      "description": "Generated locally: 300 docs with needles, no web required — for CI/airgapped"
+    }
+  ]
+}

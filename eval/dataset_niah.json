@@ -1,0 +1,47 @@
+[
+  {
+    "id": "niah_01",
+    "question": "What is the emergency activation passkey for Project Starlight cluster fra-1-edge?",
+    "expected_document_key": "needles/starlight_passkey.md",
+    "expected_keywords": ["PASSPHRASE_STARLIGHT_9842", "9443", "fra-1-edge"],
+    "needle_fact": "PASSPHRASE_STARLIGHT_9842",
+    "mode": "hybrid",
+    "difficulty": "medium"
+  },
+  {
+    "id": "niah_02",
+    "question": "How much cash did Apex Global pay to acquire Veloce AI in August 2025?",
+    "expected_document_key": "needles/financial_acquisition.md",
+    "expected_keywords": ["$74.35 million", "Veloce AI", "Apex Global", "August 18"],
+    "needle_fact": "$74.35 million",
+    "mode": "hybrid",
+    "difficulty": "easy"
+  },
+  {
+    "id": "niah_03",
+    "question": "What is the maximum permitted daily dosage of Compound-X19 for Syndrome Z-4?",
+    "expected_document_key": "needles/medical_dosage.md",
+    "expected_keywords": ["35mg/kg", "8 hours", "Syndrome Z-4"],
+    "needle_fact": "35mg/kg",
+    "mode": "hybrid",
+    "difficulty": "medium"
+  },
+  {
+    "id": "niah_04",
+    "question": "What PostgreSQL statement timeout parameter is required for HNSW reindexing operations?",
+    "expected_document_key": "needles/db_config_timeout.md",
+    "expected_keywords": ["POSTGRES_STATEMENT_TIMEOUT_MS=14200", "HNSW", "pgvector"],
+    "needle_fact": "POSTGRES_STATEMENT_TIMEOUT_MS=14200",
+    "mode": "fts",
+    "difficulty": "hard"
+  },
+  {
+    "id": "niah_05",
+    "question": "What is the compliance hash for RLS security bypass audit events in Q3?",
+    "expected_document_key": "needles/rls_audit_hash.md",
+    "expected_keywords": ["RLS_AUDIT_HASH_7719B", "Row Level Security", "compliance"],
+    "needle_fact": "RLS_AUDIT_HASH_7719B",
+    "mode": "hybrid",
+    "difficulty": "medium"
+  }
+]

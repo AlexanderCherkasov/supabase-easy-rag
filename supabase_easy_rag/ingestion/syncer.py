@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Any
 
-from postgrest import SyncPostgrestClient
+from postgrest._sync.client import (
+    SyncPostgrestClient,  # type: ignore[reportPrivateImportUsage]
+)
 
+from supabase_easy_rag.config import EasyRagConfig
 from supabase_easy_rag.core.exceptions import EasyRagIngestionError
 from supabase_easy_rag.core.models import ParsedDocument
 from supabase_easy_rag.ingestion.parser import parse_markdown_document
@@ -35,7 +39,7 @@ def _is_transient_error(exc: Exception) -> bool:
 
 
 def run_with_retry(operation_name: str, operation: Callable[[], Any]) -> Any:
-    last_error: Optional[Exception] = None
+    last_error: Exception | None = None
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
             return operation()
@@ -58,10 +62,17 @@ class DocumentSyncer:
         postgrest_client: SyncPostgrestClient,
         embedding_provider: BaseEmbeddingProvider,
         schema_name: str = "knowledgebase",
+        chunk_size: int | None = None,
+        chunk_overlap: int | None = None,
+        enable_chunking: bool | None = None,
     ):
         self.client = postgrest_client
         self.provider = embedding_provider
         self.schema_name = schema_name
+        cfg = EasyRagConfig.from_env()
+        self.enable_chunking = enable_chunking if enable_chunking is not None else cfg.enable_chunking
+        self.chunk_size = chunk_size or cfg.chunk_size
+        self.chunk_overlap = chunk_overlap or cfg.chunk_overlap
 
     def _table(self, name: str):
         return self.client.schema(self.schema_name).table(name)
@@ -69,10 +80,21 @@ class DocumentSyncer:
     def sync_directory(
         self,
         source_root: Path,
-        pattern: Optional[str] = None,
-        limit: Optional[int] = None,
+        pattern: str | None = None,
+        limit: int | None = None,
         batch_size: int = 20,
+        owner_id: str | None = None,
+        visibility: str = "private",
+        enable_chunking: bool | None = None,
+        chunk_size: int | None = None,
+        chunk_overlap: int | None = None,
     ) -> dict[str, Any]:
+        """Sync markdown files. Owner handling per RAG with Permissions guide:
+
+        - owner_id: explicit UUID to assign to all synced docs (overrides metadata)
+        - visibility: 'private' (default, assign owner), 'public' (owner_id = NULL, readable by all authenticated)
+        - enable_chunking: True to split into chunks, False to store whole doc as single chunk
+        """
         source_root = source_root.resolve()
         markdown_files = sorted(p for p in source_root.rglob("*.md") if p.is_file())
         if pattern:
@@ -136,7 +158,15 @@ class DocumentSyncer:
             # 5. Process changed documents in batches
             for i in range(0, len(changed_docs), batch_size):
                 batch = changed_docs[i : i + batch_size]
-                self._process_batch(batch, existing_map)
+                self._process_batch(
+                    batch,
+                    existing_map,
+                    owner_id=owner_id,
+                    visibility=visibility,
+                    enable_chunking=enable_chunking,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                )
 
             # 6. Mark ingestion run completed
             if run_id:
@@ -168,23 +198,62 @@ class DocumentSyncer:
         self,
         docs: Sequence[ParsedDocument],
         existing_map: dict[str, dict[str, Any]],
+        owner_id: str | None = None,
+        visibility: str = "private",
+        enable_chunking: bool | None = None,
+        chunk_size: int | None = None,
+        chunk_overlap: int | None = None,
     ) -> None:
         if not docs:
             return
 
-        # Generate embeddings for batch
-        contents = [doc.content for doc in docs]
-        embeddings = self.provider.embed_texts(contents)
+        # Chunk each doc (portable, eval-stable)
+        from supabase_easy_rag.ingestion.chunker import chunk_text as _chunk
 
-        for doc, embedding in zip(docs, embeddings):
-            # Upsert document
-            doc_payload = {
+        use_chunking = enable_chunking if enable_chunking is not None else self.enable_chunking
+        c_size = chunk_size or self.chunk_size
+        c_overlap = chunk_overlap or self.chunk_overlap
+
+        doc_chunks: dict[str, list] = {}
+        all_texts: list[str] = []
+        for doc in docs:
+            chunks = _chunk(
+                doc.content,
+                chunk_size=c_size,
+                chunk_overlap=c_overlap,
+                enable_chunking=use_chunking,
+            )
+            # fallback: if chunking produced 0, keep whole doc
+            if not chunks:
+                from supabase_easy_rag.ingestion.chunker import Chunk as _C
+
+                chunks = [_C(content=doc.content, chunk_index=0, char_count=len(doc.content), token_count=doc.token_count)]
+            doc_chunks[doc.document_key] = chunks
+            all_texts.extend([c.content for c in chunks])
+
+        embeddings = self.provider.embed_texts(all_texts)
+        # map back per doc
+        embed_idx = 0
+
+        for doc in docs:
+            # Resolve owner_id per RLS guide: explicit param > document metadata > NULL (public)
+            effective_owner = owner_id or doc.owner_id
+            if effective_owner is None and visibility == "public":
+                effective_owner = None  # public doc, readable by all authenticated
+            # If visibility is private and no owner, rely on DB default auth.uid()
+            doc_payload: dict[str, Any] = {
                 "document_key": doc.document_key,
                 "title": doc.title,
                 "top_level_category": doc.top_level_category,
                 "metadata": doc.metadata,
                 "checksum": doc.checksum,
             }
+            # Only set owner_id if explicitly provided; otherwise DB default (auth.uid()) applies on insert
+            # On update we preserve existing owner unless override given
+            if effective_owner is not None:
+                doc_payload["owner_id"] = effective_owner
+            elif visibility == "public":
+                doc_payload["owner_id"] = None
             if doc.document_key in existing_map:
                 doc_id = existing_map[doc.document_key]["id"]
                 run_with_retry(
@@ -207,44 +276,80 @@ class DocumentSyncer:
                 )
                 doc_id = (resp.data or [{}])[0]["id"]
 
-            # Insert Chunks
-            chunk_payload = {
-                "document_id": doc_id,
-                "chunk_index": 0,
-                "content": doc.content,
-                "metadata": doc.metadata,
-                "token_count": doc.token_count,
-                "char_count": doc.char_count,
-                "embedding": list(embedding),
-            }
-            run_with_retry(
-                "insert_chunk",
-                lambda: self._table("chunks").insert(chunk_payload).execute(),
-            )
-
-            # Insert Facets
-            for facet in doc.facets:
-                facet_payload = {
-                    "facet_type": facet.facet_type,
-                    "facet_key": facet.facet_key,
-                    "label": facet.label,
-                    "sort_order": facet.sort_order,
-                    "metadata": facet.metadata,
+            # Insert Sections (hierarchical H2-H6, needed for RLS chunk -> section join)
+            section_id_map: dict[str, str] = {}  # old temp id -> new db id
+            for sec in doc.sections:
+                sec_payload = {
+                    "document_id": doc_id,
+                    "heading": sec.heading,
+                    "level": sec.level,
+                    "sort_order": sec.sort_order,
+                    "metadata": sec.metadata,
                 }
+                # resolve parent
+                if sec.parent_section_id and sec.parent_section_id in section_id_map:
+                    sec_payload["parent_section_id"] = section_id_map[sec.parent_section_id]
+                resp_sec = run_with_retry(
+                    "insert_section",
+                    lambda p=sec_payload: self._table("document_sections").insert(p).execute(),  # type: ignore[misc]
+                )
+                new_id = (resp_sec.data or [{}])[0].get("id")
+                if new_id:
+                    section_id_map[sec.id] = new_id
+
+            # Insert Chunks (bulk insert to eliminate N+1 HTTP queries)
+            chunks = doc_chunks[doc.document_key]
+            first_section_db_id = next(iter(section_id_map.values()), None)
+            chunk_payloads = []
+            for ch in chunks:
+                emb = embeddings[embed_idx]
+                embed_idx += 1
+                chunk_payloads.append(
+                    {
+                        "document_id": doc_id,
+                        "section_id": ch.section_id or first_section_db_id,
+                        "chunk_index": ch.chunk_index,
+                        "content": ch.content,
+                        "metadata": {**doc.metadata, "facet_path": doc.facet_path} if doc.facet_path else doc.metadata,
+                        "token_count": ch.token_count,
+                        "char_count": ch.char_count,
+                        "embedding": list(emb),
+                    }
+                )
+            if chunk_payloads:
+                run_with_retry(
+                    "bulk_insert_chunks",
+                    lambda payload=chunk_payloads: self._table("chunks").insert(payload).execute(),  # type: ignore[misc]
+                )
+
+            # Insert Facets (bulk upsert & link)
+            if doc.facets:
+                facet_payloads = [
+                    {
+                        "facet_type": f.facet_type,
+                        "facet_key": f.facet_key,
+                        "label": f.label,
+                        "sort_order": f.sort_order,
+                        "metadata": f.metadata,
+                    }
+                    for f in doc.facets
+                ]
                 facet_resp = run_with_retry(
-                    "upsert_facet",
-                    lambda: self._table("facets")
-                    .upsert(facet_payload, on_conflict="facet_key")
+                    "upsert_facets",
+                    lambda payload=facet_payloads: self._table("facets")  # type: ignore[misc]
+                    .upsert(payload, on_conflict="facet_key")
                     .execute(),
                 )
-                facet_id = (facet_resp.data or [{}])[0].get("id")
-                if facet_id:
+                facet_rows = facet_resp.data or []
+                doc_facet_links = [
+                    {"document_id": doc_id, "facet_id": f_row["id"]}
+                    for f_row in facet_rows
+                    if isinstance(f_row, dict) and f_row.get("id")
+                ]
+                if doc_facet_links:
                     run_with_retry(
-                        "link_doc_facet",
-                        lambda: self._table("document_facets")
-                        .upsert(
-                            {"document_id": doc_id, "facet_id": facet_id},
-                            on_conflict="document_id,facet_id",
-                        )
+                        "link_doc_facets",
+                        lambda links=doc_facet_links: self._table("document_facets")  # type: ignore[misc]
+                        .upsert(links, on_conflict="document_id,facet_id")
                         .execute(),
                     )

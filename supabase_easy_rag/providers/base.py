@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Sequence
+from collections.abc import Sequence
 
 
 class BaseEmbeddingProvider(ABC):
@@ -10,7 +10,6 @@ class BaseEmbeddingProvider(ABC):
     @abstractmethod
     def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
         """Generate embedding vectors for a list of text strings."""
-        pass
 
     def embed_query(self, query: str) -> list[float]:
         """Generate an embedding vector for a single query string."""

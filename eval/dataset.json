@@ -1,0 +1,62 @@
+[
+  {
+    "id": "q1",
+    "question": "How does Supabase handle RLS for RAG?",
+    "expected_document_key": "guides/rag-permissions.md",
+    "expected_keywords": ["owner_id", "auth.uid()", "RLS", "document_owners"],
+    "mode": "hybrid"
+  },
+  {
+    "id": "q2",
+    "question": "How to share a document with multiple users?",
+    "expected_document_key": "guides/rag-permissions.md",
+    "expected_keywords": ["document_owners", "join table", "many-to-many"],
+    "mode": "hybrid"
+  },
+  {
+    "id": "q3",
+    "question": "How to configure chunk size and overlap?",
+    "expected_document_key": "setup/installation.md",
+    "expected_keywords": ["KNOWLEDGEBASE_CHUNK_SIZE", "chunk_size", "overlap"],
+    "mode": "fts"
+  },
+  {
+    "id": "q4",
+    "question": "What is the hybrid search weighting?",
+    "expected_document_key": "guides/hybrid-search.md",
+    "expected_keywords": ["0.7", "0.3", "vector", "ts_rank"],
+    "mode": "vector"
+  },
+  {
+    "id": "niah_01",
+    "question": "What is the emergency activation passkey for Project Starlight cluster fra-1-edge?",
+    "expected_document_key": "needles/starlight_passkey.md",
+    "expected_keywords": ["PASSPHRASE_STARLIGHT_9842", "9443"],
+    "needle_fact": "PASSPHRASE_STARLIGHT_9842",
+    "mode": "hybrid"
+  },
+  {
+    "id": "niah_02",
+    "question": "How much cash did Apex Global pay to acquire Veloce AI in August 2025?",
+    "expected_document_key": "needles/financial_acquisition.md",
+    "expected_keywords": ["$74.35 million", "Veloce AI"],
+    "needle_fact": "$74.35 million",
+    "mode": "hybrid"
+  },
+  {
+    "id": "niah_03",
+    "question": "What is the maximum permitted daily dosage of Compound-X19 for Syndrome Z-4?",
+    "expected_document_key": "needles/medical_dosage.md",
+    "expected_keywords": ["35mg/kg", "8 hours"],
+    "needle_fact": "35mg/kg",
+    "mode": "vector"
+  },
+  {
+    "id": "niah_04",
+    "question": "What PostgreSQL statement timeout parameter is required for HNSW reindexing operations?",
+    "expected_document_key": "needles/db_config_timeout.md",
+    "expected_keywords": ["POSTGRES_STATEMENT_TIMEOUT_MS=14200"],
+    "needle_fact": "POSTGRES_STATEMENT_TIMEOUT_MS=14200",
+    "mode": "fts"
+  }
+]

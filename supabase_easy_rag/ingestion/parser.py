@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from supabase_easy_rag.core.models import (
-    FacetDefinition,
     ParsedDocument,
     SectionDefinition,
 )
@@ -121,6 +120,9 @@ def parse_markdown_document(
     chunk_metadata = dict(metadata)
     if facet_path:
         chunk_metadata["facet_path"] = facet_path
+    # owner_id can be specified via metadata block: - **Owner ID**: <uuid>
+    # If not set, documents are public (owner_id IS NULL) or default auth.uid() on insert
+    owner_id = metadata.get("owner_id") or metadata.get("owner") or None
 
     return ParsedDocument(
         document_key=document_key_for_path(file_path, source_root),
@@ -134,4 +136,5 @@ def parse_markdown_document(
         facet_path=facet_path,
         token_count=len(re.findall(r"\S+", content)),
         char_count=len(content),
+        owner_id=owner_id,
     )

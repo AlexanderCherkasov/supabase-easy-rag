@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from typing import Any, Optional
+from typing import Any
 
-from postgrest import SyncPostgrestClient
+from postgrest._sync.client import (
+    SyncPostgrestClient,  # type: ignore[reportPrivateImportUsage]
+)
 
 
 def hash_token(token: str) -> str:
@@ -28,8 +30,8 @@ class TokenManager:
     def create_token(
         self,
         name: str,
-        expires_at: Optional[str] = None,
-        metadata: Optional[dict[str, Any]] = None,
+        expires_at: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         raw_token = generate_secure_token()
         token_hash = hash_token(raw_token)

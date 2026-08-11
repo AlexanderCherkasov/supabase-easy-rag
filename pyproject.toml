@@ -35,9 +35,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+openai = ["openai>=1.0.0"]
+azure = ["openai>=1.0.0"]
+async = ["httpx>=0.24.0"]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.21.0",
 ]
 
 [project.scripts]
@@ -46,3 +50,7 @@ supabase-easy-rag = "supabase_easy_rag.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["supabase_easy_rag"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"supabase_easy_rag/py.typed" = "supabase_easy_rag/py.typed"
+

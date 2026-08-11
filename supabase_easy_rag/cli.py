@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich import print as rprint
 from rich.console import Console
 from rich.table import Table
 
+from supabase_easy_rag.config import EasyRagConfig
 from supabase_easy_rag.core.client import EasyRagClient
+from supabase_easy_rag.providers.base import BaseEmbeddingProvider
 
 app = typer.Typer(
     name="easy-rag",
@@ -19,9 +19,27 @@ app = typer.Typer(
 console = Console()
 
 
+def _make_client(user_jwt: str | None = None, use_rls: bool = False) -> EasyRagClient:
+    """Execution-layer helper — explicitly chooses connector (only place with vendor branching)."""
+    cfg = EasyRagConfig.from_env()
+    # Choose connector explicitly based on config endpoint — example of developer choice
+    emb: BaseEmbeddingProvider | None = None
+    if cfg.embedding.api_key and cfg.embedding.model and cfg.embedding.endpoint:
+        # Explicit Azure vs OpenAI — developer decides, not lib
+        if "openai.azure.com" in cfg.embedding.endpoint or "services.ai.azure.com" in cfg.embedding.endpoint:
+            from supabase_easy_rag.providers.azure import AzureEmbeddingProvider
+
+            emb = AzureEmbeddingProvider(api_key=cfg.embedding.api_key, endpoint=cfg.embedding.endpoint, model=cfg.embedding.model)
+        else:
+            from supabase_easy_rag.providers.openai import OpenAIEmbeddingProvider
+
+            emb = OpenAIEmbeddingProvider(api_key=cfg.embedding.api_key, model=cfg.embedding.model, base_url=cfg.embedding.endpoint)
+    return EasyRagClient(embedding_provider=emb, user_jwt=user_jwt, use_rls=use_rls or bool(user_jwt))
+
+
 @app.command("init-sql")
 def init_sql(
-    output_dir: Optional[Path] = typer.Option(
+    output_dir: Path | None = typer.Option(
         None, "--output", "-o", help="Directory to save SQL migration scripts to"
     )
 ):
@@ -43,15 +61,28 @@ def init_sql(
 @app.command("sync")
 def sync_docs(
     directory: Path = typer.Argument(..., help="Path to markdown files directory"),
-    pattern: Optional[str] = typer.Option(None, "--pattern", "-p", help="Filter files by substring"),
-    limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Limit number of files to process"),
+    pattern: str | None = typer.Option(None, "--pattern", "-p", help="Filter files by substring"),
+    limit: int | None = typer.Option(None, "--limit", "-l", help="Limit number of files to process"),
+    owner_id: str | None = typer.Option(None, "--owner-id", help="Owner UUID for RLS (documents.owner_id). Overrides metadata."),
+    public: bool = typer.Option(False, "--public", help="Make documents public (owner_id=NULL, readable by all authenticated)"),
 ):
-    """Sync a directory of Markdown files into Supabase RAG database."""
-    rprint(f"[bold blue]Starting sync for directory:[/bold blue] {directory}")
-    client = EasyRagClient()
-    result = client.sync_directory(source_dir=directory, pattern=pattern, limit=limit)
+    """Sync a directory of Markdown files into Supabase RAG database.
 
-    rprint(f"[bold green]✓ Sync Completed![/bold green]")
+    RLS tip (per Supabase RAG with Permissions): use --owner-id to assign ownership,
+    or --public for shared knowledge base. Without flags, uses auth.uid() default or metadata Owner ID.
+    Use --no-chunking to ingest full documents without splitting into sub-chunks.
+    """
+    rprint(f"[bold blue]Starting sync for directory:[/bold blue] {directory}")
+    client = _make_client()
+    result = client.sync_directory(
+        source_dir=directory,
+        pattern=pattern,
+        limit=limit,
+        owner_id=owner_id,
+        visibility="public" if public else "private",
+    )
+
+    rprint("[bold green]✓ Sync Completed![/bold green]")
     rprint(f"Files seen: {result.get('files_seen')}")
     rprint(f"Files changed/synced: {result.get('files_changed')}")
 
@@ -61,18 +92,23 @@ def query_rag(
     query_string: str = typer.Argument(..., help="Search query string"),
     mode: str = typer.Option("hybrid", "--mode", "-m", help="Search mode: hybrid, vector, fts"),
     match_count: int = typer.Option(5, "--count", "-c", help="Number of results"),
-    kb_token: Optional[str] = typer.Option(None, "--token", "-t", help="Access token"),
+    kb_token: str | None = typer.Option(None, "--token", "-t", help="Access token (token mode)"),
+    use_rls: bool = typer.Option(False, "--rls", help="Use RLS mode (auth.uid() via SUPABASE_ANON_KEY + user JWT)"),
+    user_jwt: str | None = typer.Option(None, "--user-jwt", help="User JWT for RLS mode"),
 ):
     """Query the Supabase RAG engine directly from terminal."""
-    client = EasyRagClient()
-    token = kb_token or client.config.knowledgebase_access_token
+    client = _make_client(user_jwt=user_jwt, use_rls=use_rls or bool(user_jwt))
+    # If RLS, token is None -> _rls RPC; else use token
+    token: str | None = kb_token or client.config.knowledgebase_access_token
+    if use_rls or user_jwt:
+        token = None
 
     if mode == "vector":
-        results = client.search_vector(query_string, kb_token=token, match_count=match_count)
+        results = client.search_vector(query_string, kb_token=token, match_count=match_count, use_rls=bool(use_rls or user_jwt))
     elif mode == "fts":
-        results = client.search_fts(query_string, kb_token=token, match_count=match_count)
+        results = client.search_fts(query_string, kb_token=token, match_count=match_count, use_rls=bool(use_rls or user_jwt))
     else:
-        results = client.search_hybrid(query_string, kb_token=token, match_count=match_count)
+        results = client.search_hybrid(query_string, kb_token=token, match_count=match_count, use_rls=bool(use_rls or user_jwt))
 
     table = Table(title=f"RAG Search Results ({mode.upper()})")
     table.add_column("Score", style="cyan", no_wrap=True)
@@ -95,13 +131,13 @@ def query_rag(
 @app.command("create-token")
 def create_token(
     name: str = typer.Argument(..., help="Token descriptive name"),
-    expires_in_days: Optional[int] = typer.Option(None, "--expires-days", help="Expiry in days"),
+    expires_in_days: int | None = typer.Option(None, "--expires-days", help="Expiry in days"),
 ):
     """Generate a new RAG access token and save it to database."""
     client = EasyRagClient()
     raw_token, row = client.tokens.create_token(name=name)
 
-    rprint(f"[bold green]✓ Token Created Successfully![/bold green]")
+    rprint("[bold green]✓ Token Created Successfully![/bold green]")
     rprint(f"[bold yellow]Token Secret (save this):[/bold yellow] {raw_token}")
     rprint(f"Token ID: {row.get('id')}")
 

@@ -3,7 +3,7 @@ supabase-easy-rag: Production-ready Hybrid RAG engine for Supabase.
 """
 
 from supabase_easy_rag.config import EasyRagConfig, get_config
-from supabase_easy_rag.core.client import EasyRagClient
+from supabase_easy_rag.core.client import AsyncEasyRagClient, EasyRagClient
 from supabase_easy_rag.core.exceptions import (
     EasyRagAccessError,
     EasyRagConfigurationError,
@@ -19,14 +19,16 @@ from supabase_easy_rag.core.models import (
 __version__ = "0.1.0"
 
 __all__ = [
-    "EasyRagConfig",
-    "get_config",
-    "EasyRagClient",
-    "EasyRagError",
+    "AsyncEasyRagClient",
     "EasyRagAccessError",
+    "EasyRagClient",
+    "EasyRagConfig",
     "EasyRagConfigurationError",
+    "EasyRagError",
     "FacetDefinition",
     "ParsedDocument",
     "SearchResult",
     "SectionDefinition",
+    "get_config",
 ]
+

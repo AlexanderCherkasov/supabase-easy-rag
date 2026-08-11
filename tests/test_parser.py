@@ -75,6 +75,20 @@ Content 2
             self.assertEqual(len(parsed.sections), 1)
             self.assertEqual(parsed.metadata.get("category"), "Software")
 
+    def test_chunker_enable_disable(self):
+        from supabase_easy_rag.ingestion.chunker import chunk_text
+
+        long_text = "Paragraph 1 text.\n\n" * 50
+        # When chunking disabled, returns 1 chunk
+        chunks_disabled = chunk_text(long_text, chunk_size=100, enable_chunking=False)
+        self.assertEqual(len(chunks_disabled), 1)
+        self.assertEqual(chunks_disabled[0].chunk_index, 0)
+
+        # When chunking enabled, splits into multiple chunks
+        chunks_enabled = chunk_text(long_text, chunk_size=100, enable_chunking=True)
+        self.assertGreater(len(chunks_enabled), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
+

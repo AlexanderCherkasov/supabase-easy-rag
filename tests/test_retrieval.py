@@ -46,6 +46,37 @@ class TestRetrieval(unittest.TestCase):
         self.assertEqual(res[0].document_title, "Test Doc")
         mock_postgrest.schema.assert_called_with("knowledgebase")
 
+    def test_async_retrieval_engine_search_fts(self):
+        import asyncio
+
+        mock_postgrest = MagicMock()
+        mock_rpc = MagicMock()
+        mock_postgrest.schema.return_value.rpc.return_value = mock_rpc
+
+        async def dummy_execute():
+            mock_res = MagicMock()
+            mock_res.data = [
+                {
+                    "chunk_id": "c1",
+                    "document_id": "d1",
+                    "document_title": "Async Doc",
+                    "chunk_text": "Async content",
+                    "text_score": 0.9,
+                }
+            ]
+            return mock_res
+
+        mock_rpc.execute.side_effect = dummy_execute
+
+        from supabase_easy_rag.retrieval.engine import AsyncRetrievalEngine
+
+        engine = AsyncRetrievalEngine(postgrest_client=mock_postgrest)
+        res = asyncio.run(engine.search_fts(query="async test", kb_token="test_token"))
+
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0].document_title, "Async Doc")
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -32,11 +32,27 @@ env/
 *.swp
 *.swo
 
-# Environment Variables
+# Environment Variables — never commit real secrets
 .env
 .env.local
+.env.*.local
+!.env.example
 
 # Testing & Coverage
 .pytest_cache/
 .coverage
 htmlcov/
+
+# OS / temp
+.DS_Store
+Thumbs.db
+
+# Supabase local
+supabase/.temp/
+supabase/.branches/
+
+# Local eval reports (generated) — all outputs go to eval/output/
+eval/output/*
+!eval/output/.gitkeep
+eval/report*.json
+eval/*.log

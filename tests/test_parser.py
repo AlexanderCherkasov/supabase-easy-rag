@@ -88,6 +88,22 @@ Content 2
         chunks_enabled = chunk_text(long_text, chunk_size=100, enable_chunking=True)
         self.assertGreater(len(chunks_enabled), 1)
 
+    def test_chunker_edge_cases_no_infinite_loop(self):
+        from supabase_easy_rag.ingestion.chunker import chunk_text
+
+        # Edge Case 1: overlap >= chunk_size must not loop infinitely
+        text = "word " * 200
+        chunks = chunk_text(text, chunk_size=50, chunk_overlap=100)
+        self.assertGreater(len(chunks), 0)
+
+        # Edge Case 2: contiguous text with no whitespace/markdown breaks
+        unbroken_text = "A" * 500
+        chunks2 = chunk_text(unbroken_text, chunk_size=100, chunk_overlap=20)
+        self.assertEqual(len(chunks2), 5)
+
+        # Edge Case 3: empty or pure whitespace
+        self.assertEqual(chunk_text("   \n\n\t  "), [])
+
 
 if __name__ == "__main__":
     unittest.main()

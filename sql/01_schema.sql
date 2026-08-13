@@ -286,9 +286,20 @@ DROP POLICY IF EXISTS "Anyone can read facets" ON knowledgebase.facets;
 CREATE POLICY "Anyone can read facets"
 ON knowledgebase.facets FOR SELECT TO authenticated, anon USING (true);
 
-DROP POLICY IF EXISTS "Anyone can read document_facets" ON knowledgebase.document_facets;
-CREATE POLICY "Anyone can read document_facets"
-ON knowledgebase.document_facets FOR SELECT TO authenticated, anon USING (true);
+-- Document facets: restricted via linked document ownership (prevents metadata leakage)
+DROP POLICY IF EXISTS "Users can query their own document facets" ON knowledgebase.document_facets;
+CREATE POLICY "Users can query their own document facets"
+ON knowledgebase.document_facets FOR SELECT TO authenticated USING (
+  document_id IN (
+    SELECT id FROM knowledgebase.documents
+    WHERE owner_id IS NULL
+       OR owner_id = auth.uid()
+       OR EXISTS (
+         SELECT 1 FROM knowledgebase.document_owners do2
+         WHERE do2.document_id = documents.id AND do2.owner_id = auth.uid()
+       )
+  )
+);
 
 -- Ingestion / tokens / audit: service_role only (no authenticated policies => no access)
 -- Intentionally no policies for authenticated on these tables.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import uuid
 from typing import Any
 
 from postgrest._sync.client import (
@@ -48,13 +49,14 @@ class TokenManager:
         return raw_token, row
 
     def revoke_token(self, token_name_or_id: str) -> bool:
-        # Try matching by ID or name
-        response = (
-            self._table()
-            .update({"is_active": False})
-            .or_(f"id.eq.{token_name_or_id},token_name.eq.{token_name_or_id}")
-            .execute()
-        )
+        if not token_name_or_id or not str(token_name_or_id).strip():
+            return False
+        clean_target = str(token_name_or_id).strip()
+        try:
+            valid_uuid = str(uuid.UUID(clean_target))
+            response = self._table().update({"is_active": False}).eq("id", valid_uuid).execute()
+        except ValueError:
+            response = self._table().update({"is_active": False}).eq("token_name", clean_target).execute()
         return bool(response.data)
 
     def list_tokens(self) -> list[dict[str, Any]]:

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from supabase_easy_rag.config import EasyRagConfig
+from supabase_easy_rag.core.exceptions import EasyRagConfigurationError
 from supabase_easy_rag.core.models import SearchResult
 from supabase_easy_rag.ingestion.syncer import DocumentSyncer
 from supabase_easy_rag.providers.base import BaseEmbeddingProvider
@@ -35,12 +36,21 @@ class EasyRagClient:
     ) -> None:
         self.config: EasyRagConfig = config or EasyRagConfig.from_env()
         self.url: str = supabase_url or self.config.supabase_url
-        default_key: str = self.config.supabase_anon_key if (use_rls or self.config.use_rls) else self.config.supabase_service_role_key
-        self.key: str = supabase_key or default_key or self.config.supabase_service_role_key
         self.user_jwt: str | None = user_jwt
         self.use_rls: bool = use_rls if use_rls is not None else self.config.use_rls
         if self.user_jwt:
             self.use_rls = True
+
+        if self.use_rls:
+            resolved_key = supabase_key or self.config.supabase_anon_key
+            if not resolved_key:
+                raise EasyRagConfigurationError(
+                    "SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY) is required when RLS mode is enabled. "
+                    "Using the service_role key in RLS mode bypasses security policies."
+                )
+            self.key = resolved_key
+        else:
+            self.key = supabase_key or self.config.supabase_service_role_key or self.config.supabase_anon_key
 
         self.postgrest = create_postgrest_client(
             supabase_url=self.url,
@@ -162,12 +172,21 @@ class AsyncEasyRagClient:
 
         self.config: EasyRagConfig = config or EasyRagConfig.from_env()
         self.url: str = supabase_url or self.config.supabase_url
-        default_key: str = self.config.supabase_anon_key if (use_rls or self.config.use_rls) else self.config.supabase_service_role_key
-        self.key: str = supabase_key or default_key or self.config.supabase_service_role_key
         self.user_jwt: str | None = user_jwt
         self.use_rls: bool = use_rls if use_rls is not None else self.config.use_rls
         if self.user_jwt:
             self.use_rls = True
+
+        if self.use_rls:
+            resolved_key = supabase_key or self.config.supabase_anon_key
+            if not resolved_key:
+                raise EasyRagConfigurationError(
+                    "SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY) is required when RLS mode is enabled. "
+                    "Using the service_role key in RLS mode bypasses security policies."
+                )
+            self.key = resolved_key
+        else:
+            self.key = supabase_key or self.config.supabase_service_role_key or self.config.supabase_anon_key
 
         self.postgrest = create_async_postgrest_client(
             supabase_url=self.url,

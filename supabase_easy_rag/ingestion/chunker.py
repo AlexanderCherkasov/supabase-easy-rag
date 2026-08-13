@@ -34,6 +34,8 @@ def chunk_text(
 ) -> list[Chunk]:
     if not text or not text.strip():
         return []
+    chunk_size = max(10, chunk_size)
+    chunk_overlap = max(0, min(chunk_overlap, chunk_size - 1))
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     if not enable_chunking or len(text) <= chunk_size:
         return [Chunk(content=text, chunk_index=0, char_count=len(text), token_count=len(re.findall(r"\S+", text)), section_id=section_id)]
@@ -45,16 +47,18 @@ def chunk_text(
         end = min(start + chunk_size, len(text))
         if end < len(text):
             end = _find_best_break(text, start, end)
+        if end <= start:
+            end = min(start + chunk_size, len(text))
         chunk_str = text[start:end].strip()
         if chunk_str:
             chunks.append(Chunk(content=chunk_str, chunk_index=idx, char_count=len(chunk_str), token_count=len(re.findall(r"\S+", chunk_str)), section_id=section_id))
             idx += 1
         if end >= len(text):
             break
-        start = max(0, end - chunk_overlap)
-        # Avoid infinite loop
-        if start >= len(text):
-            break
+        next_start = end - chunk_overlap
+        if next_start <= start:
+            next_start = end
+        start = next_start
     return chunks
 
 

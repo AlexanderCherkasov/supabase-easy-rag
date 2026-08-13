@@ -53,7 +53,7 @@ pip install supabase-easy-rag
 Export the SQL migration files using the CLI:
 
 ```bash
-easy-rag init-sql --output ./supabase/migrations
+easy-rag init-sql --output ./migrations
 ```
 
 Run `01_schema.sql` and `02_functions.sql` inside your Supabase SQL Editor.

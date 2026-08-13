@@ -98,8 +98,13 @@ Content 2
 
         # Edge Case 2: contiguous text with no whitespace/markdown breaks
         unbroken_text = "A" * 500
+        # 500 chars with chunk_size=100 and overlap=20 (step=80) produces exactly 6 chunks
         chunks2 = chunk_text(unbroken_text, chunk_size=100, chunk_overlap=20)
-        self.assertEqual(len(chunks2), 5)
+        self.assertEqual(len(chunks2), 6)
+
+        # 500 chars with chunk_size=100 and overlap=0 (step=100) produces exactly 5 chunks
+        chunks_no_overlap = chunk_text(unbroken_text, chunk_size=100, chunk_overlap=0)
+        self.assertEqual(len(chunks_no_overlap), 5)
 
         # Edge Case 3: empty or pure whitespace
         self.assertEqual(chunk_text("   \n\n\t  "), [])

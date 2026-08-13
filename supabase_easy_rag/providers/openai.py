@@ -69,7 +69,7 @@ class OpenAIChatProvider(BaseChatProvider):
                         {"role": "user", "content": prompt},
                     ],
                 )
-                if hasattr(resp, "output_text") and resp.output_text:
+                if hasattr(resp, "output_text") and isinstance(resp.output_text, str) and resp.output_text:
                     return str(resp.output_text)
             except Exception:
                 pass  # Fallback to chat.completions below

@@ -42,7 +42,7 @@ class TestProviders(unittest.TestCase):
 
     @patch("supabase_easy_rag.providers.openai.OpenAI")
     def test_openai_chat_provider_mocked(self, mock_openai_cls):
-        mock_instance = MagicMock()
+        mock_instance = MagicMock(spec=["chat"])
         mock_openai_cls.return_value = mock_instance
         mock_choice = MagicMock()
         mock_choice.message.content = "Mocked LLM answer"
@@ -55,6 +55,20 @@ class TestProviders(unittest.TestCase):
 
         self.assertEqual(answer, "Mocked LLM answer")
         mock_instance.chat.completions.create.assert_called_once()
+
+    @patch("supabase_easy_rag.providers.openai.OpenAI")
+    def test_openai_chat_provider_responses_api_mocked(self, mock_openai_cls):
+        mock_instance = MagicMock()
+        mock_openai_cls.return_value = mock_instance
+        mock_resp = MagicMock()
+        mock_resp.output_text = "Responses API answer"
+        mock_instance.responses.create.return_value = mock_resp
+
+        provider = OpenAIChatProvider(api_key="sk-dummy", model="gpt-4o-mini")
+        answer = provider.chat(prompt="What is RAG?")
+
+        self.assertEqual(answer, "Responses API answer")
+        mock_instance.responses.create.assert_called_once()
 
 
 if __name__ == "__main__":

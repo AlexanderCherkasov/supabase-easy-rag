@@ -29,6 +29,64 @@ If your Supabase database (`https://your-project.supabase.co`) is brand new, the
    ```
    Should return `[]` without `PGRST106` errors.
 
+## Upgrading from v0.1 to v0.2 (Two-Stage RRF + Weighted FTS)
+
+If you already have an existing `knowledgebase` database and want to upgrade to Two-Stage RRF Hybrid Search and Weighted FTS without losing data, run the following SQL script in your Supabase SQL Editor:
+
+```sql
+-- 1. Upgrade search_vector to support weighted FTS (Title: 'A', Heading: 'B', Content: 'D')
+ALTER TABLE knowledgebase.chunks DROP COLUMN IF EXISTS search_vector;
+ALTER TABLE knowledgebase.chunks ADD COLUMN search_vector tsvector;
+
+-- 2. Create the weighted FTS trigger
+CREATE OR REPLACE FUNCTION knowledgebase.chunks_search_vector_trigger()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_doc_title TEXT := '';
+    v_sec_heading TEXT := '';
+    v_fts_config TEXT := 'english';
+BEGIN
+    SELECT COALESCE(title, '') INTO v_doc_title
+    FROM knowledgebase.documents
+    WHERE id = NEW.document_id;
+
+    IF NEW.section_id IS NOT NULL THEN
+        SELECT COALESCE(heading, '') INTO v_sec_heading
+        FROM knowledgebase.document_sections
+        WHERE id = NEW.section_id;
+    END IF;
+
+    IF NEW.metadata ? 'fts_config' THEN
+        v_fts_config := NEW.metadata ->> 'fts_config';
+    END IF;
+
+    NEW.search_vector :=
+        setweight(to_tsvector(v_fts_config::regconfig, COALESCE(v_doc_title, '')), 'A') ||
+        setweight(to_tsvector(v_fts_config::regconfig, COALESCE(v_sec_heading, '')), 'B') ||
+        setweight(to_tsvector(v_fts_config::regconfig, COALESCE(NEW.content, '')), 'D');
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 3. Attach triggers to chunks, documents, and sections
+DROP TRIGGER IF EXISTS trigger_kb_chunks_search_vector ON knowledgebase.chunks;
+CREATE TRIGGER trigger_kb_chunks_search_vector
+BEFORE INSERT OR UPDATE OF document_id, section_id, content, metadata
+ON knowledgebase.chunks
+FOR EACH ROW EXECUTE FUNCTION knowledgebase.chunks_search_vector_trigger();
+
+-- Backfill search_vector for all existing chunks
+UPDATE knowledgebase.chunks SET updated_at = NOW();
+
+-- 4. Recreate GIN Index
+DROP INDEX IF EXISTS knowledgebase.idx_kb_chunks_fts;
+CREATE INDEX idx_kb_chunks_fts ON knowledgebase.chunks USING gin(search_vector);
+
+-- 5. Run sql/02_functions.sql to update RPC functions to two-stage RRF retrieval.
+```
+
 ## Context
 PostgREST in Supabase Cloud exposes `public, graphql_public` schemas by default. Creating the `knowledgebase` schema makes Supabase expose it dynamically, but a reload might be required. Once migrated, RLS policies (`auth.uid() -> documents.owner_id`) and hybrid RPC functions (`search_chunks_hybrid`, `*_rls`) operate seamlessly.
+
 

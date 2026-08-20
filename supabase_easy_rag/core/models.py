@@ -52,3 +52,22 @@ class SearchResult:
     vector_score: float | None = None
     text_score: float | None = None
     hybrid_score: float | None = None
+    vector_rank: int | None = None
+    text_rank: int | None = None
+    section_id: str | None = None
+    expanded_text: str | None = None
+
+    @property
+    def final_score(self) -> float | None:
+        """Alias for hybrid_score / primary result score."""
+        return self.hybrid_score if self.hybrid_score is not None else (self.vector_score if self.vector_score is not None else self.text_score)
+
+    @property
+    def effective_text(self) -> str:
+        """Returns expanded_text if available, otherwise chunk_text."""
+        return self.expanded_text or self.chunk_text
+
+    @property
+    def vector_similarity(self) -> float | None:
+        """Alias for vector_score."""
+        return self.vector_score

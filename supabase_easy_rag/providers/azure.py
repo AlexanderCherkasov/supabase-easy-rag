@@ -33,10 +33,11 @@ class AzureEmbeddingProvider(BaseEmbeddingProvider):
             return []
         out: list[list[float]] = []
         for start in range(0, len(texts), self.batch_size):
-            batch = list(texts[start : start + self.batch_size])
+            # Guard against exceeding 8192 OpenAI token limit on giant passages (especially non-latin scripts)
+            batch = [t[:6000] if len(t) > 6000 else t for t in texts[start : start + self.batch_size]]
             resp = self.client.embeddings.create(model=self.model, input=batch)
             out.extend([item.embedding for item in resp.data])
-            if start + self.batch_size < len(texts):
+            if start + self.batch_size < len(texts) and self.batch_sleep > 0:
                 time.sleep(self.batch_sleep)
         return out
 

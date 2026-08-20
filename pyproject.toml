@@ -4,8 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "supabase-easy-rag"
-version = "0.1.0"
+version = "0.1.1"
 description = "Production-ready, lightweight Hybrid RAG (Vector + Full-Text Search + Facets) engine for Supabase."
+
 readme = "README.md"
 authors = [
     { name = "Alexander Cherkasov" }
@@ -53,4 +54,5 @@ packages = ["supabase_easy_rag"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "supabase_easy_rag/py.typed" = "supabase_easy_rag/py.typed"
+"sql" = "supabase_easy_rag/sql"
 

@@ -41,11 +41,18 @@ def _make_client(user_jwt: str | None = None, use_rls: bool = False) -> EasyRagC
 def init_sql(
     output_dir: Path | None = typer.Option(
         None, "--output", "-o", help="Directory to save SQL migration scripts to"
-    )
+    ),
+    dimensions: int = typer.Option(
+        1536, "--dimensions", "-d", help="pgvector embedding dimensionality (e.g. 384, 768, 1536, 3072)"
+    ),
 ):
-    """Output or save SQL schema migrations for Supabase."""
-    sql_dir = Path(__file__).resolve().parent.parent / "sql"
+    sql_dir = Path(__file__).resolve().parent / "sql"
+    if not sql_dir.exists():
+        sql_dir = Path(__file__).resolve().parent.parent / "sql"
     schema_sql = (sql_dir / "01_schema.sql").read_text(encoding="utf-8")
+
+    if dimensions != 1536:
+        schema_sql = schema_sql.replace("VECTOR(1536)", f"VECTOR({dimensions})")
     functions_sql = (sql_dir / "02_functions.sql").read_text(encoding="utf-8")
     combined_sql = f"{schema_sql}\n\n{functions_sql}"
 
@@ -53,7 +60,7 @@ def init_sql(
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "01_schema.sql").write_text(schema_sql, encoding="utf-8")
         (output_dir / "02_functions.sql").write_text(functions_sql, encoding="utf-8")
-        rprint(f"[bold green]✓ SQL migrations saved to {output_dir}[/bold green]")
+        rprint(f"[bold green]✓ SQL migrations saved to {output_dir} (dimensions={dimensions})[/bold green]")
     else:
         rprint(combined_sql)
 
@@ -95,8 +102,14 @@ def query_rag(
     kb_token: str | None = typer.Option(None, "--token", "-t", help="Access token (token mode)"),
     use_rls: bool = typer.Option(False, "--rls", help="Use RLS mode (auth.uid() via SUPABASE_ANON_KEY + user JWT)"),
     user_jwt: str | None = typer.Option(None, "--user-jwt", help="User JWT for RLS mode"),
+    rrf_k: int = typer.Option(60, "--rrf-k", help="RRF smoothing constant k (default 60)"),
+    vector_weight: float = typer.Option(1.0, "--vector-weight", help="RRF vector component weight"),
+    text_weight: float = typer.Option(1.0, "--text-weight", help="RRF lexical component weight"),
+    fts_config: str = typer.Option("english", "--fts-config", help="Text search config (e.g. english, russian, simple)"),
+    min_similarity: float | None = typer.Option(None, "--min-similarity", help="Minimum cosine vector similarity threshold"),
+    candidate_count: int | None = typer.Option(None, "--candidate-count", help="Oversampling candidate count"),
 ):
-    """Query the Supabase RAG engine directly from terminal."""
+    """Query the Supabase RAG engine directly from terminal with RRF rank fusion."""
     client = _make_client(user_jwt=user_jwt, use_rls=use_rls or bool(user_jwt))
     # If RLS, token is None -> _rls RPC; else use token
     token: str | None = kb_token or client.config.knowledgebase_access_token
@@ -104,22 +117,49 @@ def query_rag(
         token = None
 
     if mode == "vector":
-        results = client.search_vector(query_string, kb_token=token, match_count=match_count, use_rls=bool(use_rls or user_jwt))
+        results = client.search_vector(
+            query_string,
+            kb_token=token,
+            match_count=match_count,
+            min_vector_similarity=min_similarity,
+            use_rls=bool(use_rls or user_jwt),
+        )
     elif mode == "fts":
-        results = client.search_fts(query_string, kb_token=token, match_count=match_count, use_rls=bool(use_rls or user_jwt))
+        results = client.search_fts(
+            query_string,
+            kb_token=token,
+            match_count=match_count,
+            fts_config=fts_config,
+            use_rls=bool(use_rls or user_jwt),
+        )
     else:
-        results = client.search_hybrid(query_string, kb_token=token, match_count=match_count, use_rls=bool(use_rls or user_jwt))
+        results = client.search_hybrid(
+            query_string,
+            kb_token=token,
+            match_count=match_count,
+            candidate_count=candidate_count,
+            rrf_k=rrf_k,
+            vector_weight=vector_weight,
+            text_weight=text_weight,
+            fts_config=fts_config,
+            min_vector_similarity=min_similarity,
+            use_rls=bool(use_rls or user_jwt),
+        )
 
     table = Table(title=f"RAG Search Results ({mode.upper()})")
     table.add_column("Score", style="cyan", no_wrap=True)
+    table.add_column("Ranks (V/T)", style="blue", no_wrap=True)
     table.add_column("Title", style="magenta")
     table.add_column("Section", style="green")
     table.add_column("Excerpt", style="yellow")
 
     for item in results:
         score = f"{item.hybrid_score or item.vector_score or item.text_score or 0.0:.4f}"
+        vr = str(item.vector_rank) if item.vector_rank is not None else "-"
+        tr = str(item.text_rank) if item.text_rank is not None else "-"
         table.add_row(
             score,
+            f"V:{vr} / T:{tr}",
             item.document_title,
             item.section_title or "-",
             item.chunk_text[:100] + "...",

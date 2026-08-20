@@ -51,8 +51,11 @@ Thumbs.db
 supabase/.temp/
 supabase/.branches/
 
-# Local eval reports (generated) — all outputs go to eval/output/
+# Local eval reports (generated) — keep official benchmark reports
 eval/output/*
+!eval/output/BENCHMARK_REPORT.md
+!eval/output/benchmark_report.json
 !eval/output/.gitkeep
 eval/report*.json
 eval/*.log
+

@@ -100,12 +100,15 @@ $$;
 
 -- ============================================================================
 -- 1. Vector Search RPC — supports token OR RLS
+-- =========================================================================-- ============================================================================
+-- 1. Vector Search RPC — supports token OR RLS
 -- ============================================================================
 CREATE OR REPLACE FUNCTION knowledgebase.match_chunks_by_embedding(
     p_kb_token TEXT,
-    p_query_embedding VECTOR(1536),
+    p_query_embedding VECTOR,
     p_match_count INT DEFAULT 5,
-    p_facet_keys TEXT[] DEFAULT NULL
+    p_facet_keys TEXT[] DEFAULT NULL,
+    p_min_vector_similarity DOUBLE PRECISION DEFAULT NULL
 )
 RETURNS TABLE (
     chunk_id UUID,
@@ -117,7 +120,9 @@ RETURNS TABLE (
     metadata JSONB,
     vector_score DOUBLE PRECISION,
     text_score REAL,
-    hybrid_score DOUBLE PRECISION
+    hybrid_score DOUBLE PRECISION,
+    vector_rank INT,
+    text_rank INT
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -135,300 +140,22 @@ BEGIN
     END IF;
 
     RETURN QUERY
-    SELECT
-        c.id,
-        d.id,
-        d.title,
-        ds.heading,
-        c.content,
-        c.metadata ->> 'facet_path',
-        c.metadata,
-        1 - (c.embedding <=> p_query_embedding) AS vector_score,
-        NULL::REAL AS text_score,
-        1 - (c.embedding <=> p_query_embedding) AS hybrid_score
-    FROM knowledgebase.chunks c
-    JOIN knowledgebase.documents d ON d.id = c.document_id
-    LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
-    WHERE c.embedding IS NOT NULL
-      -- RLS enforcement when in RLS mode (explicit filter, since SECURITY DEFINER bypasses RLS)
-      AND (
-        NOT v_is_rls
-        OR d.owner_id IS NULL
-        OR d.owner_id = auth.uid()
-        OR EXISTS (
-            SELECT 1 FROM knowledgebase.document_owners do2
-            WHERE do2.document_id = d.id AND do2.owner_id = auth.uid()
-        )
-      )
-      AND (
-        p_facet_keys IS NULL
-        OR EXISTS (
-            SELECT 1
-            FROM knowledgebase.document_facets df
-            JOIN knowledgebase.facets f ON f.id = df.facet_id
-            WHERE df.document_id = d.id
-              AND f.facet_key = ANY (p_facet_keys)
-        )
-      )
-    ORDER BY c.embedding <=> p_query_embedding
-    LIMIT GREATEST(COALESCE(p_match_count, 5), 1);
-END;
-$$;
-
--- RLS-only variant (SECURITY INVOKER — respects RLS natively, no token needed)
-CREATE OR REPLACE FUNCTION knowledgebase.match_chunks_by_embedding_rls(
-    p_query_embedding VECTOR(1536),
-    p_match_count INT DEFAULT 5,
-    p_facet_keys TEXT[] DEFAULT NULL
-)
-RETURNS TABLE (
-    chunk_id UUID,
-    document_id UUID,
-    document_title TEXT,
-    section_title TEXT,
-    chunk_text TEXT,
-    facet_path TEXT,
-    metadata JSONB,
-    vector_score DOUBLE PRECISION,
-    text_score REAL,
-    hybrid_score DOUBLE PRECISION
-)
-LANGUAGE plpgsql
-SECURITY INVOKER
-SET search_path = knowledgebase, public
-AS $$
-BEGIN
-    IF p_query_embedding IS NULL THEN
-        RAISE EXCEPTION 'Query embedding is required';
-    END IF;
-    -- RLS policies on chunks/documents enforce access automatically
-    RETURN QUERY
-    SELECT
-        c.id, d.id, d.title, ds.heading, c.content,
-        c.metadata ->> 'facet_path', c.metadata,
-        1 - (c.embedding <=> p_query_embedding), NULL::REAL,
-        1 - (c.embedding <=> p_query_embedding)
-    FROM knowledgebase.chunks c
-    JOIN knowledgebase.documents d ON d.id = c.document_id
-    LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
-    WHERE c.embedding IS NOT NULL
-      AND (
-        p_facet_keys IS NULL
-        OR EXISTS (
-            SELECT 1 FROM knowledgebase.document_facets df
-            JOIN knowledgebase.facets f ON f.id = df.facet_id
-            WHERE df.document_id = d.id AND f.facet_key = ANY (p_facet_keys)
-        )
-      )
-    ORDER BY c.embedding <=> p_query_embedding
-    LIMIT GREATEST(COALESCE(p_match_count, 5), 1);
-END;
-$$;
-
--- ============================================================================
--- 2. Full-Text Search (FTS) RPC — supports token OR RLS
--- ============================================================================
-CREATE OR REPLACE FUNCTION knowledgebase.search_chunks_full_text(
-    p_kb_token TEXT,
-    p_query TEXT,
-    p_match_count INT DEFAULT 5,
-    p_facet_keys TEXT[] DEFAULT NULL
-)
-RETURNS TABLE (
-    chunk_id UUID,
-    document_id UUID,
-    document_title TEXT,
-    section_title TEXT,
-    chunk_text TEXT,
-    facet_path TEXT,
-    metadata JSONB,
-    vector_score DOUBLE PRECISION,
-    text_score REAL,
-    hybrid_score DOUBLE PRECISION
-)
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = knowledgebase, public
-AS $$
-DECLARE
-    v_tsquery tsquery;
-    v_token_id UUID;
-    v_is_rls BOOLEAN;
-BEGIN
-    v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
-    v_is_rls := (v_token_id IS NULL AND knowledgebase.is_rls_authenticated());
-
-    IF p_query IS NULL OR btrim(p_query) = '' THEN
-        RAISE EXCEPTION 'Full-text query is required';
-    END IF;
-
-    v_tsquery := websearch_to_tsquery('english', p_query);
-
-    RETURN QUERY
-    SELECT
-        c.id,
-        d.id,
-        d.title,
-        ds.heading,
-        c.content,
-        c.metadata ->> 'facet_path',
-        c.metadata,
-        NULL::DOUBLE PRECISION AS vector_score,
-        ts_rank_cd(c.search_vector, v_tsquery) AS text_score,
-        ts_rank_cd(c.search_vector, v_tsquery)::DOUBLE PRECISION AS hybrid_score
-    FROM knowledgebase.chunks c
-    JOIN knowledgebase.documents d ON d.id = c.document_id
-    LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
-    WHERE c.search_vector @@ v_tsquery
-      AND (
-        NOT v_is_rls
-        OR d.owner_id IS NULL
-        OR d.owner_id = auth.uid()
-        OR EXISTS (
-            SELECT 1 FROM knowledgebase.document_owners do2
-            WHERE do2.document_id = d.id AND do2.owner_id = auth.uid()
-        )
-      )
-      AND (
-        p_facet_keys IS NULL
-        OR EXISTS (
-            SELECT 1
-            FROM knowledgebase.document_facets df
-            JOIN knowledgebase.facets f ON f.id = df.facet_id
-            WHERE df.document_id = d.id
-              AND f.facet_key = ANY (p_facet_keys)
-        )
-      )
-    ORDER BY ts_rank_cd(c.search_vector, v_tsquery) DESC, d.title ASC
-    LIMIT GREATEST(COALESCE(p_match_count, 5), 1);
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION knowledgebase.search_chunks_full_text_rls(
-    p_query TEXT,
-    p_match_count INT DEFAULT 5,
-    p_facet_keys TEXT[] DEFAULT NULL
-)
-RETURNS TABLE (
-    chunk_id UUID,
-    document_id UUID,
-    document_title TEXT,
-    section_title TEXT,
-    chunk_text TEXT,
-    facet_path TEXT,
-    metadata JSONB,
-    vector_score DOUBLE PRECISION,
-    text_score REAL,
-    hybrid_score DOUBLE PRECISION
-)
-LANGUAGE plpgsql
-SECURITY INVOKER
-SET search_path = knowledgebase, public
-AS $$
-DECLARE
-    v_tsquery tsquery;
-BEGIN
-    IF p_query IS NULL OR btrim(p_query) = '' THEN
-        RAISE EXCEPTION 'Full-text query is required';
-    END IF;
-    v_tsquery := websearch_to_tsquery('english', p_query);
-    RETURN QUERY
-    SELECT c.id, d.id, d.title, ds.heading, c.content,
-           c.metadata ->> 'facet_path', c.metadata,
-           NULL::DOUBLE PRECISION, ts_rank_cd(c.search_vector, v_tsquery),
-           ts_rank_cd(c.search_vector, v_tsquery)::DOUBLE PRECISION
-    FROM knowledgebase.chunks c
-    JOIN knowledgebase.documents d ON d.id = c.document_id
-    LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
-    WHERE c.search_vector @@ v_tsquery
-      AND (
-        p_facet_keys IS NULL
-        OR EXISTS (
-            SELECT 1 FROM knowledgebase.document_facets df
-            JOIN knowledgebase.facets f ON f.id = df.facet_id
-            WHERE df.document_id = d.id AND f.facet_key = ANY (p_facet_keys)
-        )
-      )
-    ORDER BY ts_rank_cd(c.search_vector, v_tsquery) DESC, d.title ASC
-    LIMIT GREATEST(COALESCE(p_match_count, 5), 1);
-END;
-$$;
-
--- ============================================================================
--- 3. Hybrid Search RPC (Weighted Vector + FTS + Title Boost) — token OR RLS
--- ============================================================================
-CREATE OR REPLACE FUNCTION knowledgebase.search_chunks_hybrid(
-    p_kb_token TEXT,
-    p_query TEXT,
-    p_query_embedding VECTOR(1536),
-    p_match_count INT DEFAULT 5,
-    p_facet_keys TEXT[] DEFAULT NULL
-)
-RETURNS TABLE (
-    chunk_id UUID,
-    document_id UUID,
-    document_title TEXT,
-    section_title TEXT,
-    chunk_text TEXT,
-    facet_path TEXT,
-    metadata JSONB,
-    vector_score DOUBLE PRECISION,
-    text_score REAL,
-    hybrid_score DOUBLE PRECISION
-)
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = knowledgebase, public
-AS $$
-DECLARE
-    v_tsquery tsquery;
-    v_token_id UUID;
-    v_is_rls BOOLEAN;
-BEGIN
-    v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
-    v_is_rls := (v_token_id IS NULL AND knowledgebase.is_rls_authenticated());
-
-    IF p_query_embedding IS NULL AND (p_query IS NULL OR btrim(p_query) = '') THEN
-        RAISE EXCEPTION 'Query text or query embedding is required';
-    END IF;
-
-    IF p_query IS NOT NULL AND btrim(p_query) <> '' THEN
-        v_tsquery := websearch_to_tsquery('english', p_query);
-    END IF;
-
-    RETURN QUERY
-    WITH scored AS (
+    WITH candidates AS (
         SELECT
-            c.id AS chunk_id,
-            d.id AS document_id,
-            d.title AS document_title,
-            ds.heading AS section_title,
-            c.content AS chunk_text,
-            c.metadata ->> 'facet_path' AS facet_path,
-            c.metadata AS metadata,
-            CASE
-                WHEN p_query_embedding IS NOT NULL AND c.embedding IS NOT NULL
-                    THEN 1 - (c.embedding <=> p_query_embedding)
-                ELSE NULL::DOUBLE PRECISION
-            END AS vector_score,
-            CASE
-                WHEN v_tsquery IS NOT NULL AND c.search_vector @@ v_tsquery
-                    THEN ts_rank_cd(c.search_vector, v_tsquery)
-                ELSE NULL::REAL
-            END AS text_score,
-            CASE
-                WHEN lower(d.title) = lower(COALESCE(btrim(p_query), '')) THEN 0.15
-                WHEN COALESCE(btrim(p_query), '') <> '' AND lower(d.title) LIKE '%' || lower(btrim(p_query)) || '%' THEN 0.05
-                ELSE 0.0
-            END AS title_boost,
-            d.owner_id AS owner_id
+            c.id,
+            d.id AS doc_id,
+            d.title AS doc_title,
+            ds.heading AS sec_title,
+            c.content,
+            c.metadata ->> 'facet_path' AS f_path,
+            c.metadata AS c_meta,
+            (1 - (c.embedding <=> p_query_embedding)) AS v_score,
+            ROW_NUMBER() OVER (ORDER BY c.embedding <=> p_query_embedding) AS v_rank
         FROM knowledgebase.chunks c
         JOIN knowledgebase.documents d ON d.id = c.document_id
         LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
-        WHERE (
-            (p_query_embedding IS NOT NULL AND c.embedding IS NOT NULL)
-            OR (v_tsquery IS NOT NULL AND c.search_vector @@ v_tsquery)
-        )
+        WHERE c.embedding IS NOT NULL
+          AND (p_min_vector_similarity IS NULL OR (1 - (c.embedding <=> p_query_embedding)) >= p_min_vector_similarity)
           AND (
             NOT v_is_rls
             OR d.owner_id IS NULL
@@ -448,33 +175,33 @@ BEGIN
                   AND f.facet_key = ANY (p_facet_keys)
             )
           )
+        ORDER BY c.embedding <=> p_query_embedding
+        LIMIT GREATEST(COALESCE(p_match_count, 5), 1)
     )
     SELECT
-        scored.chunk_id,
-        scored.document_id,
-        scored.document_title,
-        scored.section_title,
-        scored.chunk_text,
-        scored.facet_path,
-        scored.metadata,
-        scored.vector_score,
-        scored.text_score,
-        (
-            COALESCE(scored.vector_score, 0.0) * 0.7
-            + COALESCE(scored.text_score, 0.0)::DOUBLE PRECISION * 0.3
-            + scored.title_boost
-        ) AS hybrid_score
-    FROM scored
-    ORDER BY hybrid_score DESC, document_title ASC
-    LIMIT GREATEST(COALESCE(p_match_count, 5), 1);
+        candidates.id AS chunk_id,
+        candidates.doc_id AS document_id,
+        candidates.doc_title AS document_title,
+        candidates.sec_title AS section_title,
+        candidates.content AS chunk_text,
+        candidates.f_path AS facet_path,
+        candidates.c_meta AS metadata,
+        candidates.v_score AS vector_score,
+        NULL::REAL AS text_score,
+        candidates.v_score AS hybrid_score,
+        candidates.v_rank::INT AS vector_rank,
+        NULL::INT AS text_rank
+    FROM candidates
+    ORDER BY candidates.v_score DESC, candidates.doc_title ASC;
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION knowledgebase.search_chunks_hybrid_rls(
-    p_query TEXT,
-    p_query_embedding VECTOR(1536),
+-- RLS-only variant (SECURITY INVOKER — respects RLS natively, no token needed)
+CREATE OR REPLACE FUNCTION knowledgebase.match_chunks_by_embedding_rls(
+    p_query_embedding VECTOR,
     p_match_count INT DEFAULT 5,
-    p_facet_keys TEXT[] DEFAULT NULL
+    p_facet_keys TEXT[] DEFAULT NULL,
+    p_min_vector_similarity DOUBLE PRECISION DEFAULT NULL
 )
 RETURNS TABLE (
     chunk_id UUID,
@@ -486,7 +213,185 @@ RETURNS TABLE (
     metadata JSONB,
     vector_score DOUBLE PRECISION,
     text_score REAL,
-    hybrid_score DOUBLE PRECISION
+    hybrid_score DOUBLE PRECISION,
+    vector_rank INT,
+    text_rank INT
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = knowledgebase, public
+AS $$
+BEGIN
+    IF p_query_embedding IS NULL THEN
+        RAISE EXCEPTION 'Query embedding is required';
+    END IF;
+
+    RETURN QUERY
+    WITH candidates AS (
+        SELECT
+            c.id, d.id AS doc_id, d.title AS doc_title, ds.heading AS sec_title, c.content,
+            c.metadata ->> 'facet_path' AS f_path, c.metadata AS c_meta,
+            (1 - (c.embedding <=> p_query_embedding)) AS v_score,
+            ROW_NUMBER() OVER (ORDER BY c.embedding <=> p_query_embedding) AS v_rank
+        FROM knowledgebase.chunks c
+        JOIN knowledgebase.documents d ON d.id = c.document_id
+        LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
+        WHERE c.embedding IS NOT NULL
+          AND (p_min_vector_similarity IS NULL OR (1 - (c.embedding <=> p_query_embedding)) >= p_min_vector_similarity)
+          AND (
+            p_facet_keys IS NULL
+            OR EXISTS (
+                SELECT 1 FROM knowledgebase.document_facets df
+                JOIN knowledgebase.facets f ON f.id = df.facet_id
+                WHERE df.document_id = d.id AND f.facet_key = ANY (p_facet_keys)
+            )
+          )
+        ORDER BY c.embedding <=> p_query_embedding
+        LIMIT GREATEST(COALESCE(p_match_count, 5), 1)
+    )
+    SELECT
+        candidates.id, candidates.doc_id, candidates.doc_title, candidates.sec_title, candidates.content,
+        candidates.f_path, candidates.c_meta, candidates.v_score, NULL::REAL,
+        candidates.v_score, candidates.v_rank::INT, NULL::INT
+    FROM candidates
+    ORDER BY candidates.v_score DESC, candidates.doc_title ASC;
+END;
+$$;
+
+-- ============================================================================
+-- 2. Full-Text Search (FTS) RPC — supports token OR RLS
+-- ============================================================================
+CREATE OR REPLACE FUNCTION knowledgebase.search_chunks_full_text(
+    p_kb_token TEXT,
+    p_query TEXT,
+    p_match_count INT DEFAULT 5,
+    p_facet_keys TEXT[] DEFAULT NULL,
+    p_fts_config TEXT DEFAULT 'english'
+)
+RETURNS TABLE (
+    chunk_id UUID,
+    document_id UUID,
+    document_title TEXT,
+    section_title TEXT,
+    chunk_text TEXT,
+    facet_path TEXT,
+    metadata JSONB,
+    vector_score DOUBLE PRECISION,
+    text_score REAL,
+    hybrid_score DOUBLE PRECISION,
+    vector_rank INT,
+    text_rank INT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = knowledgebase, public
+AS $$
+DECLARE
+    v_tsquery tsquery;
+    v_token_id UUID;
+    v_is_rls BOOLEAN;
+    v_regconfig regconfig;
+BEGIN
+    v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
+    v_is_rls := (v_token_id IS NULL AND knowledgebase.is_rls_authenticated());
+
+    IF p_query IS NULL OR btrim(p_query) = '' THEN
+        RAISE EXCEPTION 'Full-text query is required';
+    END IF;
+
+    BEGIN
+        v_regconfig := COALESCE(NULLIF(btrim(p_fts_config), ''), 'english')::regconfig;
+    EXCEPTION WHEN OTHERS THEN
+        v_regconfig := 'simple'::regconfig;
+    END;
+
+    -- Adaptive tsquery: try websearch_to_tsquery first; if no match or empty, use plainto_tsquery
+    v_tsquery := websearch_to_tsquery(v_regconfig, p_query);
+    IF v_tsquery IS NULL OR v_tsquery = ''::tsquery THEN
+        v_tsquery := plainto_tsquery(v_regconfig, p_query);
+    END IF;
+
+    -- If still empty or query contains terms, fallback to simple regconfig or OR-connected query
+    IF v_tsquery IS NULL OR v_tsquery = ''::tsquery THEN
+        v_tsquery := plainto_tsquery('simple'::regconfig, p_query);
+    END IF;
+
+
+    RETURN QUERY
+    WITH candidates AS (
+        SELECT
+            c.id,
+            d.id AS doc_id,
+            d.title AS doc_title,
+            ds.heading AS sec_title,
+            c.content,
+            c.metadata ->> 'facet_path' AS f_path,
+            c.metadata AS c_meta,
+            ts_rank(c.search_vector, v_tsquery) AS t_score,
+            ROW_NUMBER() OVER (ORDER BY ts_rank(c.search_vector, v_tsquery) DESC, c.id ASC) AS t_rank
+        FROM knowledgebase.chunks c
+        JOIN knowledgebase.documents d ON d.id = c.document_id
+        LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
+        WHERE c.search_vector @@ v_tsquery
+          AND (
+            NOT v_is_rls
+            OR d.owner_id IS NULL
+            OR d.owner_id = auth.uid()
+            OR EXISTS (
+                SELECT 1 FROM knowledgebase.document_owners do2
+                WHERE do2.document_id = d.id AND do2.owner_id = auth.uid()
+            )
+          )
+          AND (
+            p_facet_keys IS NULL
+            OR EXISTS (
+                SELECT 1
+                FROM knowledgebase.document_facets df
+                JOIN knowledgebase.facets f ON f.id = df.facet_id
+                WHERE df.document_id = d.id
+                  AND f.facet_key = ANY (p_facet_keys)
+            )
+          )
+        ORDER BY ts_rank(c.search_vector, v_tsquery) DESC, d.title ASC
+        LIMIT GREATEST(COALESCE(p_match_count, 5), 1)
+    )
+    SELECT
+        candidates.id AS chunk_id,
+        candidates.doc_id AS document_id,
+        candidates.doc_title AS document_title,
+        candidates.sec_title AS section_title,
+        candidates.content AS chunk_text,
+        candidates.f_path AS facet_path,
+        candidates.c_meta AS metadata,
+        NULL::DOUBLE PRECISION AS vector_score,
+        candidates.t_score AS text_score,
+        candidates.t_score::DOUBLE PRECISION AS hybrid_score,
+        NULL::INT AS vector_rank,
+        candidates.t_rank::INT AS text_rank
+    FROM candidates
+    ORDER BY candidates.t_score DESC, candidates.doc_title ASC;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION knowledgebase.search_chunks_full_text_rls(
+    p_query TEXT,
+    p_match_count INT DEFAULT 5,
+    p_facet_keys TEXT[] DEFAULT NULL,
+    p_fts_config TEXT DEFAULT 'english'
+)
+RETURNS TABLE (
+    chunk_id UUID,
+    document_id UUID,
+    document_title TEXT,
+    section_title TEXT,
+    chunk_text TEXT,
+    facet_path TEXT,
+    metadata JSONB,
+    vector_score DOUBLE PRECISION,
+    text_score REAL,
+    hybrid_score DOUBLE PRECISION,
+    vector_rank INT,
+    text_rank INT
 )
 LANGUAGE plpgsql
 SECURITY INVOKER
@@ -494,30 +399,379 @@ SET search_path = knowledgebase, public
 AS $$
 DECLARE
     v_tsquery tsquery;
+    v_regconfig regconfig;
+BEGIN
+    IF p_query IS NULL OR btrim(p_query) = '' THEN
+        RAISE EXCEPTION 'Full-text query is required';
+    END IF;
+
+    BEGIN
+        v_regconfig := COALESCE(NULLIF(btrim(p_fts_config), ''), 'english')::regconfig;
+    EXCEPTION WHEN OTHERS THEN
+        v_regconfig := 'simple'::regconfig;
+    END;
+
+    -- Adaptive tsquery: try websearch_to_tsquery first; if no match or empty, use plainto_tsquery
+    v_tsquery := websearch_to_tsquery(v_regconfig, p_query);
+    IF v_tsquery IS NULL OR v_tsquery = ''::tsquery THEN
+        v_tsquery := plainto_tsquery(v_regconfig, p_query);
+    END IF;
+
+    -- If still empty, fallback to simple regconfig
+    IF v_tsquery IS NULL OR v_tsquery = ''::tsquery THEN
+        v_tsquery := plainto_tsquery('simple'::regconfig, p_query);
+    END IF;
+
+
+    RETURN QUERY
+    WITH candidates AS (
+        SELECT
+            c.id, d.id AS doc_id, d.title AS doc_title, ds.heading AS sec_title, c.content,
+            c.metadata ->> 'facet_path' AS f_path, c.metadata AS c_meta,
+            ts_rank(c.search_vector, v_tsquery) AS t_score,
+            ROW_NUMBER() OVER (ORDER BY ts_rank(c.search_vector, v_tsquery) DESC, c.id ASC) AS t_rank
+        FROM knowledgebase.chunks c
+        JOIN knowledgebase.documents d ON d.id = c.document_id
+        LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
+        WHERE c.search_vector @@ v_tsquery
+          AND (
+            p_facet_keys IS NULL
+            OR EXISTS (
+                SELECT 1 FROM knowledgebase.document_facets df
+                JOIN knowledgebase.facets f ON f.id = df.facet_id
+                WHERE df.document_id = d.id AND f.facet_key = ANY (p_facet_keys)
+            )
+          )
+        ORDER BY ts_rank(c.search_vector, v_tsquery) DESC, d.title ASC
+
+        LIMIT GREATEST(COALESCE(p_match_count, 5), 1)
+    )
+    SELECT
+        candidates.id, candidates.doc_id, candidates.doc_title, candidates.sec_title, candidates.content,
+        candidates.f_path, candidates.c_meta, NULL::DOUBLE PRECISION, candidates.t_score,
+        candidates.t_score::DOUBLE PRECISION, NULL::INT, candidates.t_rank::INT
+    FROM candidates
+    ORDER BY candidates.t_score DESC, candidates.doc_title ASC;
+END;
+$$;
+
+-- ============================================================================
+-- 3. Hybrid Search RPC (Two-Stage Vector + FTS Candidates with RRF Fusion)
+-- ============================================================================
+CREATE OR REPLACE FUNCTION knowledgebase.search_chunks_hybrid(
+    p_kb_token TEXT,
+    p_query TEXT,
+    p_query_embedding VECTOR,
+    p_match_count INT DEFAULT 5,
+    p_facet_keys TEXT[] DEFAULT NULL,
+    p_candidate_count INT DEFAULT NULL,
+    p_rrf_k INT DEFAULT 60,
+    p_vector_weight DOUBLE PRECISION DEFAULT 1.0,
+    p_text_weight DOUBLE PRECISION DEFAULT 1.0,
+    p_fts_config TEXT DEFAULT 'english',
+    p_min_vector_similarity DOUBLE PRECISION DEFAULT NULL
+)
+RETURNS TABLE (
+    chunk_id UUID,
+    document_id UUID,
+    document_title TEXT,
+    section_title TEXT,
+    chunk_text TEXT,
+    facet_path TEXT,
+    metadata JSONB,
+    vector_score DOUBLE PRECISION,
+    text_score REAL,
+    hybrid_score DOUBLE PRECISION,
+    vector_rank INT,
+    text_rank INT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = knowledgebase, public
+AS $$
+DECLARE
+    v_tsquery tsquery;
+    v_token_id UUID;
+    v_is_rls BOOLEAN;
+    v_candidate_count INT;
+    v_rrf_k INT;
+    v_vector_weight DOUBLE PRECISION;
+    v_text_weight DOUBLE PRECISION;
+    v_regconfig regconfig;
+BEGIN
+    v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
+    v_is_rls := (v_token_id IS NULL AND knowledgebase.is_rls_authenticated());
+
+    IF p_query_embedding IS NULL AND (p_query IS NULL OR btrim(p_query) = '') THEN
+        RAISE EXCEPTION 'Query text or query embedding is required';
+    END IF;
+
+    -- Candidate pool oversampling with configurable upper bound
+    v_candidate_count := LEAST(COALESCE(p_candidate_count, GREATEST(COALESCE(p_match_count, 5) * 10, 50)), 500);
+    v_rrf_k := GREATEST(COALESCE(p_rrf_k, 60), 1);
+    v_vector_weight := GREATEST(COALESCE(p_vector_weight, 1.0), 0.0);
+    v_text_weight := GREATEST(COALESCE(p_text_weight, 1.0), 0.0);
+    BEGIN
+        v_regconfig := COALESCE(NULLIF(btrim(p_fts_config), ''), 'english')::regconfig;
+    EXCEPTION WHEN OTHERS THEN
+        v_regconfig := 'simple'::regconfig;
+    END;
+
+    IF p_query IS NOT NULL AND btrim(p_query) <> '' THEN
+        v_tsquery := websearch_to_tsquery(v_regconfig, p_query);
+        IF v_tsquery IS NULL OR v_tsquery = ''::tsquery THEN
+            v_tsquery := plainto_tsquery(v_regconfig, p_query);
+        END IF;
+        IF v_tsquery IS NULL OR v_tsquery = ''::tsquery THEN
+            v_tsquery := plainto_tsquery('simple'::regconfig, p_query);
+        END IF;
+    END IF;
+
+
+    RETURN QUERY
+    WITH vector_candidates AS (
+        SELECT
+            c.id AS chunk_id,
+            (1 - (c.embedding <=> p_query_embedding)) AS vector_similarity,
+            ROW_NUMBER() OVER (ORDER BY c.embedding <=> p_query_embedding) AS vector_rank
+        FROM knowledgebase.chunks c
+        JOIN knowledgebase.documents d ON d.id = c.document_id
+        WHERE p_query_embedding IS NOT NULL
+          AND c.embedding IS NOT NULL
+          AND (p_min_vector_similarity IS NULL OR (1 - (c.embedding <=> p_query_embedding)) >= p_min_vector_similarity)
+          AND (
+            NOT v_is_rls
+            OR d.owner_id IS NULL
+            OR d.owner_id = auth.uid()
+            OR EXISTS (
+                SELECT 1 FROM knowledgebase.document_owners do2
+                WHERE do2.document_id = d.id AND do2.owner_id = auth.uid()
+            )
+          )
+          AND (
+            p_facet_keys IS NULL
+            OR EXISTS (
+                SELECT 1
+                FROM knowledgebase.document_facets df
+                JOIN knowledgebase.facets f ON f.id = df.facet_id
+                WHERE df.document_id = d.id
+                  AND f.facet_key = ANY (p_facet_keys)
+            )
+          )
+        ORDER BY c.embedding <=> p_query_embedding
+        LIMIT v_candidate_count
+    ),
+    fts_candidates AS (
+        SELECT
+            c.id AS chunk_id,
+            ts_rank(c.search_vector, v_tsquery) AS fts_score,
+            ROW_NUMBER() OVER (ORDER BY ts_rank(c.search_vector, v_tsquery) DESC, c.id ASC) AS text_rank
+        FROM knowledgebase.chunks c
+        JOIN knowledgebase.documents d ON d.id = c.document_id
+        WHERE v_tsquery IS NOT NULL
+          AND c.search_vector @@ v_tsquery
+          AND (
+            NOT v_is_rls
+            OR d.owner_id IS NULL
+            OR d.owner_id = auth.uid()
+            OR EXISTS (
+                SELECT 1 FROM knowledgebase.document_owners do2
+                WHERE do2.document_id = d.id AND do2.owner_id = auth.uid()
+            )
+          )
+          AND (
+            p_facet_keys IS NULL
+            OR EXISTS (
+                SELECT 1
+                FROM knowledgebase.document_facets df
+                JOIN knowledgebase.facets f ON f.id = df.facet_id
+                WHERE df.document_id = d.id
+                  AND f.facet_key = ANY (p_facet_keys)
+            )
+          )
+        ORDER BY ts_rank(c.search_vector, v_tsquery) DESC
+        LIMIT v_candidate_count
+    ),
+
+
+    fused AS (
+        SELECT
+            COALESCE(vc.chunk_id, fc.chunk_id) AS chunk_id,
+            vc.vector_similarity,
+            fc.fts_score AS text_score,
+            vc.vector_rank::INT AS vector_rank,
+            fc.text_rank::INT AS text_rank,
+            (
+                (CASE WHEN vc.vector_rank IS NOT NULL THEN (v_vector_weight / (v_rrf_k + vc.vector_rank)) ELSE 0.0 END)
+                +
+                (CASE WHEN fc.text_rank IS NOT NULL THEN (v_text_weight / (v_rrf_k + fc.text_rank)) ELSE 0.0 END)
+            ) AS rrf_score
+        FROM vector_candidates vc
+        FULL OUTER JOIN fts_candidates fc ON vc.chunk_id = fc.chunk_id
+    )
+    SELECT
+        c.id AS chunk_id,
+        d.id AS document_id,
+        d.title AS document_title,
+        ds.heading AS section_title,
+        c.content AS chunk_text,
+        c.metadata ->> 'facet_path' AS facet_path,
+        c.metadata AS metadata,
+        fused.vector_similarity AS vector_score,
+        fused.text_score AS text_score,
+        fused.rrf_score AS hybrid_score,
+        fused.vector_rank,
+        fused.text_rank
+    FROM fused
+    JOIN knowledgebase.chunks c ON c.id = fused.chunk_id
+    JOIN knowledgebase.documents d ON d.id = c.document_id
+    LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
+    ORDER BY fused.rrf_score DESC, d.title ASC
+    LIMIT GREATEST(COALESCE(p_match_count, 5), 1);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION knowledgebase.search_chunks_hybrid_rls(
+    p_query TEXT,
+    p_query_embedding VECTOR,
+    p_match_count INT DEFAULT 5,
+    p_facet_keys TEXT[] DEFAULT NULL,
+    p_candidate_count INT DEFAULT NULL,
+    p_rrf_k INT DEFAULT 60,
+    p_vector_weight DOUBLE PRECISION DEFAULT 1.0,
+    p_text_weight DOUBLE PRECISION DEFAULT 1.0,
+    p_fts_config TEXT DEFAULT 'english',
+    p_min_vector_similarity DOUBLE PRECISION DEFAULT NULL
+)
+RETURNS TABLE (
+    chunk_id UUID,
+    document_id UUID,
+    document_title TEXT,
+    section_title TEXT,
+    chunk_text TEXT,
+    facet_path TEXT,
+    metadata JSONB,
+    vector_score DOUBLE PRECISION,
+    text_score REAL,
+    hybrid_score DOUBLE PRECISION,
+    vector_rank INT,
+    text_rank INT
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = knowledgebase, public
+AS $$
+DECLARE
+    v_tsquery tsquery;
+    v_candidate_count INT;
+    v_rrf_k INT;
+    v_vector_weight DOUBLE PRECISION;
+    v_text_weight DOUBLE PRECISION;
+    v_regconfig regconfig;
 BEGIN
     IF p_query_embedding IS NULL AND (p_query IS NULL OR btrim(p_query) = '') THEN
         RAISE EXCEPTION 'Query text or query embedding is required';
     END IF;
+
+    v_candidate_count := LEAST(COALESCE(p_candidate_count, GREATEST(COALESCE(p_match_count, 5) * 10, 50)), 500);
+    v_rrf_k := GREATEST(COALESCE(p_rrf_k, 60), 1);
+    v_vector_weight := GREATEST(COALESCE(p_vector_weight, 1.0), 0.0);
+    v_text_weight := GREATEST(COALESCE(p_text_weight, 1.0), 0.0);
+    BEGIN
+        v_regconfig := COALESCE(NULLIF(btrim(p_fts_config), ''), 'english')::regconfig;
+    EXCEPTION WHEN OTHERS THEN
+        v_regconfig := 'simple'::regconfig;
+    END;
+
     IF p_query IS NOT NULL AND btrim(p_query) <> '' THEN
-        v_tsquery := websearch_to_tsquery('english', p_query);
+        v_tsquery := websearch_to_tsquery(v_regconfig, p_query);
+        IF v_tsquery IS NULL OR v_tsquery = ''::tsquery THEN
+            v_tsquery := plainto_tsquery(v_regconfig, p_query);
+        END IF;
+        IF v_tsquery IS NULL OR v_tsquery = ''::tsquery THEN
+            v_tsquery := plainto_tsquery('simple'::regconfig, p_query);
+        END IF;
     END IF;
+
+
     RETURN QUERY
-    WITH scored AS (
-        SELECT c.id AS chunk_id, d.id AS document_id, d.title AS document_title,
-               ds.heading AS section_title, c.content AS chunk_text,
-               c.metadata ->> 'facet_path' AS facet_path, c.metadata AS metadata,
-               CASE WHEN p_query_embedding IS NOT NULL AND c.embedding IS NOT NULL THEN 1 - (c.embedding <=> p_query_embedding) ELSE NULL END AS vector_score,
-               CASE WHEN v_tsquery IS NOT NULL AND c.search_vector @@ v_tsquery THEN ts_rank_cd(c.search_vector, v_tsquery) ELSE NULL END AS text_score,
-               CASE WHEN lower(d.title) = lower(COALESCE(btrim(p_query), '')) THEN 0.15 WHEN COALESCE(btrim(p_query), '') <> '' AND lower(d.title) LIKE '%' || lower(btrim(p_query)) || '%' THEN 0.05 ELSE 0.0 END AS title_boost
+    WITH vector_candidates AS (
+        SELECT
+            c.id AS chunk_id,
+            (1 - (c.embedding <=> p_query_embedding)) AS vector_similarity,
+            ROW_NUMBER() OVER (ORDER BY c.embedding <=> p_query_embedding) AS vector_rank
         FROM knowledgebase.chunks c
         JOIN knowledgebase.documents d ON d.id = c.document_id
-        LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
-        WHERE ((p_query_embedding IS NOT NULL AND c.embedding IS NOT NULL) OR (v_tsquery IS NOT NULL AND c.search_vector @@ v_tsquery))
-          AND (p_facet_keys IS NULL OR EXISTS (SELECT 1 FROM knowledgebase.document_facets df JOIN knowledgebase.facets f ON f.id = df.facet_id WHERE df.document_id = d.id AND f.facet_key = ANY (p_facet_keys)))
+        WHERE p_query_embedding IS NOT NULL
+          AND c.embedding IS NOT NULL
+          AND (p_min_vector_similarity IS NULL OR (1 - (c.embedding <=> p_query_embedding)) >= p_min_vector_similarity)
+          AND (
+            p_facet_keys IS NULL
+            OR EXISTS (
+                SELECT 1 FROM knowledgebase.document_facets df
+                JOIN knowledgebase.facets f ON f.id = df.facet_id
+                WHERE df.document_id = d.id AND f.facet_key = ANY (p_facet_keys)
+            )
+          )
+        ORDER BY c.embedding <=> p_query_embedding
+        LIMIT v_candidate_count
+    ),
+    fts_candidates AS (
+        SELECT
+            c.id AS chunk_id,
+            ts_rank(c.search_vector, v_tsquery) AS fts_score,
+            ROW_NUMBER() OVER (ORDER BY ts_rank(c.search_vector, v_tsquery) DESC, c.id ASC) AS text_rank
+        FROM knowledgebase.chunks c
+        JOIN knowledgebase.documents d ON d.id = c.document_id
+        WHERE v_tsquery IS NOT NULL
+          AND c.search_vector @@ v_tsquery
+          AND (
+            p_facet_keys IS NULL
+            OR EXISTS (
+                SELECT 1 FROM knowledgebase.document_facets df
+                JOIN knowledgebase.facets f ON f.id = df.facet_id
+                WHERE df.document_id = d.id AND f.facet_key = ANY (p_facet_keys)
+            )
+          )
+        ORDER BY ts_rank(c.search_vector, v_tsquery) DESC
+        LIMIT v_candidate_count
+    ),
+
+
+    fused AS (
+        SELECT
+            COALESCE(vc.chunk_id, fc.chunk_id) AS chunk_id,
+            vc.vector_similarity,
+            fc.fts_score AS text_score,
+            vc.vector_rank::INT AS vector_rank,
+            fc.text_rank::INT AS text_rank,
+            (
+                (CASE WHEN vc.vector_rank IS NOT NULL THEN (v_vector_weight / (v_rrf_k + vc.vector_rank)) ELSE 0.0 END)
+                +
+                (CASE WHEN fc.text_rank IS NOT NULL THEN (v_text_weight / (v_rrf_k + fc.text_rank)) ELSE 0.0 END)
+            ) AS rrf_score
+        FROM vector_candidates vc
+        FULL OUTER JOIN fts_candidates fc ON vc.chunk_id = fc.chunk_id
     )
-    SELECT scored.chunk_id, scored.document_id, scored.document_title, scored.section_title, scored.chunk_text, scored.facet_path, scored.metadata, scored.vector_score, scored.text_score,
-           (COALESCE(scored.vector_score,0)*0.7 + COALESCE(scored.text_score,0)::DOUBLE PRECISION*0.3 + scored.title_boost) AS hybrid_score
-    FROM scored ORDER BY hybrid_score DESC, document_title ASC LIMIT GREATEST(COALESCE(p_match_count,5),1);
+    SELECT
+        c.id AS chunk_id,
+        d.id AS document_id,
+        d.title AS document_title,
+        ds.heading AS section_title,
+        c.content AS chunk_text,
+        c.metadata ->> 'facet_path' AS facet_path,
+        c.metadata AS metadata,
+        fused.vector_similarity AS vector_score,
+        fused.text_score AS text_score,
+        fused.rrf_score AS hybrid_score,
+        fused.vector_rank,
+        fused.text_rank
+    FROM fused
+    JOIN knowledgebase.chunks c ON c.id = fused.chunk_id
+    JOIN knowledgebase.documents d ON d.id = c.document_id
+    LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
+    ORDER BY fused.rrf_score DESC, d.title ASC
+    LIMIT GREATEST(COALESCE(p_match_count, 5), 1);
 END;
 $$;
 
@@ -597,12 +851,13 @@ GRANT EXECUTE ON FUNCTION knowledgebase.hash_access_token(TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION knowledgebase.assert_retrieval_access(TEXT) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION knowledgebase.is_rls_authenticated() TO authenticated, service_role;
 
-GRANT EXECUTE ON FUNCTION knowledgebase.match_chunks_by_embedding(TEXT, VECTOR, INT, TEXT[]) TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION knowledgebase.search_chunks_full_text(TEXT, TEXT, INT, TEXT[]) TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION knowledgebase.search_chunks_hybrid(TEXT, TEXT, VECTOR, INT, TEXT[]) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION knowledgebase.match_chunks_by_embedding(TEXT, VECTOR, INT, TEXT[], DOUBLE PRECISION) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION knowledgebase.search_chunks_full_text(TEXT, TEXT, INT, TEXT[], TEXT) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION knowledgebase.search_chunks_hybrid(TEXT, TEXT, VECTOR, INT, TEXT[], INT, INT, DOUBLE PRECISION, DOUBLE PRECISION, TEXT, DOUBLE PRECISION) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION knowledgebase.get_navigation_facets(TEXT, TEXT) TO authenticated, service_role;
 
-GRANT EXECUTE ON FUNCTION knowledgebase.match_chunks_by_embedding_rls(VECTOR, INT, TEXT[]) TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION knowledgebase.search_chunks_full_text_rls(TEXT, INT, TEXT[]) TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION knowledgebase.search_chunks_hybrid_rls(TEXT, VECTOR, INT, TEXT[]) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION knowledgebase.match_chunks_by_embedding_rls(VECTOR, INT, TEXT[], DOUBLE PRECISION) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION knowledgebase.search_chunks_full_text_rls(TEXT, INT, TEXT[], TEXT) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION knowledgebase.search_chunks_hybrid_rls(TEXT, VECTOR, INT, TEXT[], INT, INT, DOUBLE PRECISION, DOUBLE PRECISION, TEXT, DOUBLE PRECISION) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION knowledgebase.get_navigation_facets_rls(TEXT) TO authenticated, service_role;
+

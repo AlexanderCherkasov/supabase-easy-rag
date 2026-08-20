@@ -76,7 +76,35 @@ class TestRetrieval(unittest.TestCase):
         self.assertEqual(len(res), 1)
         self.assertEqual(res[0].document_title, "Async Doc")
 
+    def test_retrieval_engine_search_hybrid_default_parameters(self):
+        mock_postgrest = MagicMock()
+        mock_rpc = MagicMock()
+        mock_postgrest.schema.return_value.rpc.return_value = mock_rpc
+        mock_rpc.execute.return_value.data = [
+            {
+                "chunk_id": "c1",
+                "document_id": "d1",
+                "document_title": "Hybrid Doc",
+                "chunk_text": "Hybrid content",
+                "vector_score": 0.82,
+                "text_score": 0.35,
+                "hybrid_score": 0.031,
+                "vector_rank": 1,
+                "text_rank": 2,
+            }
+        ]
+
+        engine = RetrievalEngine(postgrest_client=mock_postgrest)
+        res = engine.search_hybrid(query="hybrid test", kb_token="test_token")
+
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0].document_title, "Hybrid Doc")
+        self.assertEqual(res[0].vector_rank, 1)
+        self.assertEqual(res[0].text_rank, 2)
+        self.assertEqual(res[0].hybrid_score, 0.031)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

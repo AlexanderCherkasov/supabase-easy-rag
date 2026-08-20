@@ -67,8 +67,8 @@ CREATE TABLE IF NOT EXISTS knowledgebase.chunks (
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     token_count INT,
     char_count INT,
-    embedding VECTOR(1536),
-    search_vector tsvector GENERATED ALWAYS AS (to_tsvector('english', COALESCE(content, ''))) STORED,
+    embedding VECTOR(1536), -- Configurable dimensions via: easy-rag init-sql --dimensions <DIM>
+    search_vector tsvector,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (document_id, chunk_index)
@@ -134,6 +134,75 @@ CREATE TABLE IF NOT EXISTS knowledgebase.access_token_audit (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Function: Compute Weighted tsvector (A: Title, B: Section Heading, D: Content)
+-- Supports dynamic language / fts_config from metadata with safe fallback to 'simple'
+CREATE OR REPLACE FUNCTION knowledgebase.chunks_search_vector_trigger()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_doc_title TEXT := '';
+    v_sec_heading TEXT := '';
+    v_fts_config TEXT := 'english';
+    v_regconfig regconfig := 'english'::regconfig;
+BEGIN
+    SELECT COALESCE(title, '') INTO v_doc_title
+    FROM knowledgebase.documents
+    WHERE id = NEW.document_id;
+
+    IF NEW.section_id IS NOT NULL THEN
+        SELECT COALESCE(heading, '') INTO v_sec_heading
+        FROM knowledgebase.document_sections
+        WHERE id = NEW.section_id;
+    END IF;
+
+    -- Extract language / fts_config from metadata
+    IF NEW.metadata ? 'fts_config' THEN
+        v_fts_config := NEW.metadata ->> 'fts_config';
+    ELSIF NEW.metadata ? 'language' THEN
+        v_fts_config := NEW.metadata ->> 'language';
+    END IF;
+
+    -- Safe cast to regconfig; fallback to 'simple' for unsupported languages
+    BEGIN
+        v_regconfig := v_fts_config::regconfig;
+    EXCEPTION WHEN OTHERS THEN
+        v_regconfig := 'simple'::regconfig;
+    END;
+
+    NEW.search_vector :=
+        setweight(to_tsvector(v_regconfig, COALESCE(v_doc_title, '')), 'A') ||
+        setweight(to_tsvector(v_regconfig, COALESCE(v_sec_heading, '')), 'B') ||
+        setweight(to_tsvector(v_regconfig, COALESCE(NEW.content, '')), 'D');
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Cascade search vector update on Document Title change
+CREATE OR REPLACE FUNCTION knowledgebase.documents_title_update_trigger()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.title IS DISTINCT FROM NEW.title THEN
+        UPDATE knowledgebase.chunks
+        SET updated_at = NOW()
+        WHERE document_id = NEW.id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Cascade search vector update on Section Heading change
+CREATE OR REPLACE FUNCTION knowledgebase.sections_heading_update_trigger()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.heading IS DISTINCT FROM NEW.heading THEN
+        UPDATE knowledgebase.chunks
+        SET updated_at = NOW()
+        WHERE section_id = NEW.id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_kb_documents_owner ON knowledgebase.documents(owner_id);
 CREATE INDEX IF NOT EXISTS idx_kb_doc_owners_doc ON knowledgebase.document_owners(document_id);
@@ -151,12 +220,41 @@ CREATE INDEX IF NOT EXISTS idx_kb_tokens_active ON knowledgebase.access_tokens(i
 CREATE INDEX IF NOT EXISTS idx_kb_token_audit ON knowledgebase.access_token_audit(access_token_id, created_at DESC);
 
 -- Triggers for updated_at
+DROP TRIGGER IF EXISTS update_kb_documents_updated_at ON knowledgebase.documents;
 CREATE TRIGGER update_kb_documents_updated_at BEFORE UPDATE ON knowledgebase.documents FOR EACH ROW EXECUTE FUNCTION knowledgebase.update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_kb_sections_updated_at ON knowledgebase.document_sections;
 CREATE TRIGGER update_kb_sections_updated_at BEFORE UPDATE ON knowledgebase.document_sections FOR EACH ROW EXECUTE FUNCTION knowledgebase.update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_kb_chunks_updated_at ON knowledgebase.chunks;
 CREATE TRIGGER update_kb_chunks_updated_at BEFORE UPDATE ON knowledgebase.chunks FOR EACH ROW EXECUTE FUNCTION knowledgebase.update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_kb_facets_updated_at ON knowledgebase.facets;
 CREATE TRIGGER update_kb_facets_updated_at BEFORE UPDATE ON knowledgebase.facets FOR EACH ROW EXECUTE FUNCTION knowledgebase.update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_kb_ingestion_updated_at ON knowledgebase.ingestion_runs;
 CREATE TRIGGER update_kb_ingestion_updated_at BEFORE UPDATE ON knowledgebase.ingestion_runs FOR EACH ROW EXECUTE FUNCTION knowledgebase.update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_kb_tokens_updated_at ON knowledgebase.access_tokens;
 CREATE TRIGGER update_kb_tokens_updated_at BEFORE UPDATE ON knowledgebase.access_tokens FOR EACH ROW EXECUTE FUNCTION knowledgebase.update_updated_at_column();
+
+-- Triggers for Weighted FTS Search Vector
+DROP TRIGGER IF EXISTS trigger_kb_chunks_search_vector ON knowledgebase.chunks;
+CREATE TRIGGER trigger_kb_chunks_search_vector
+BEFORE INSERT OR UPDATE OF document_id, section_id, content, metadata
+ON knowledgebase.chunks
+FOR EACH ROW EXECUTE FUNCTION knowledgebase.chunks_search_vector_trigger();
+
+
+DROP TRIGGER IF EXISTS trigger_kb_documents_title_update ON knowledgebase.documents;
+CREATE TRIGGER trigger_kb_documents_title_update
+AFTER UPDATE OF title ON knowledgebase.documents
+FOR EACH ROW EXECUTE FUNCTION knowledgebase.documents_title_update_trigger();
+
+DROP TRIGGER IF EXISTS trigger_kb_sections_heading_update ON knowledgebase.document_sections;
+CREATE TRIGGER trigger_kb_sections_heading_update
+AFTER UPDATE OF heading ON knowledgebase.document_sections
+FOR EACH ROW EXECUTE FUNCTION knowledgebase.sections_heading_update_trigger();
 
 -- ============================================================================
 -- Row Level Security (RLS) - Fine-Grained Access Control for RAG

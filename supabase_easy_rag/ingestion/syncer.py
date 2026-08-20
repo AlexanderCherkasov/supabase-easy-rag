@@ -88,12 +88,14 @@ class DocumentSyncer:
         enable_chunking: bool | None = None,
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
+        max_workers: int = 4,
     ) -> dict[str, Any]:
         """Sync markdown files. Owner handling per RAG with Permissions guide:
 
         - owner_id: explicit UUID to assign to all synced docs (overrides metadata)
         - visibility: 'private' (default, assign owner), 'public' (owner_id = NULL, readable by all authenticated)
         - enable_chunking: True to split into chunks, False to store whole doc as single chunk
+        - max_workers: Number of parallel worker threads for batch ingestion
         """
         source_root = source_root.resolve()
         markdown_files = sorted(p for p in source_root.rglob("*.md") if p.is_file())
@@ -155,18 +157,38 @@ class DocumentSyncer:
 
             files_changed = len(changed_docs)
 
-            # 5. Process changed documents in batches
-            for i in range(0, len(changed_docs), batch_size):
-                batch = changed_docs[i : i + batch_size]
-                self._process_batch(
-                    batch,
-                    existing_map,
-                    owner_id=owner_id,
-                    visibility=visibility,
-                    enable_chunking=enable_chunking,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap,
-                )
+            # 5. Process changed documents in parallel batches
+            batches = [changed_docs[i : i + batch_size] for i in range(0, len(changed_docs), batch_size)]
+
+            if max_workers > 1 and len(batches) > 1:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                def _worker_task(batch_docs: list[ParsedDocument]) -> None:
+                    self._process_batch(
+                        batch_docs,
+                        existing_map,
+                        owner_id=owner_id,
+                        visibility=visibility,
+                        enable_chunking=enable_chunking,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap,
+                    )
+
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(_worker_task, b) for b in batches]
+                    for f in as_completed(futures):
+                        f.result()
+            else:
+                for batch in batches:
+                    self._process_batch(
+                        batch,
+                        existing_map,
+                        owner_id=owner_id,
+                        visibility=visibility,
+                        enable_chunking=enable_chunking,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap,
+                    )
 
             # 6. Mark ingestion run completed
             if run_id:
@@ -177,6 +199,7 @@ class DocumentSyncer:
                         "completed_at": datetime.now(timezone.utc).isoformat(),
                     }
                 ).eq("id", run_id).execute()
+
 
             return {
                 "files_seen": len(markdown_files),
@@ -223,13 +246,15 @@ class DocumentSyncer:
                 chunk_overlap=c_overlap,
                 enable_chunking=use_chunking,
             )
-            # fallback: if chunking produced 0, keep whole doc
+            # fallback: if chunking produced 0 or enable_chunking is False, keep doc content (capped safely)
             if not chunks:
                 from supabase_easy_rag.ingestion.chunker import Chunk as _C
 
-                chunks = [_C(content=doc.content, chunk_index=0, char_count=len(doc.content), token_count=doc.token_count)]
+                safe_content = doc.content[:4000] if len(doc.content) > 4000 else doc.content
+                chunks = [_C(content=safe_content, chunk_index=0, char_count=len(safe_content), token_count=min(doc.token_count or 0, 1000))]
             doc_chunks[doc.document_key] = chunks
-            all_texts.extend([c.content for c in chunks])
+            all_texts.extend([c.content[:4000] for c in chunks])
+
 
         embeddings = self.provider.embed_texts(all_texts)
         # map back per doc
@@ -260,44 +285,35 @@ class DocumentSyncer:
                     "update_document",
                     lambda: self._table("documents").update(doc_payload).eq("id", doc_id).execute(),
                 )
-                # Clear old chunks/sections/facets
-                run_with_retry(
-                    "clear_doc_sections",
-                    lambda: self._table("document_sections").delete().eq("document_id", doc_id).execute(),
-                )
-                run_with_retry(
-                    "clear_doc_chunks",
-                    lambda: self._table("chunks").delete().eq("document_id", doc_id).execute(),
-                )
             else:
                 resp = run_with_retry(
-                    "insert_document",
-                    lambda: self._table("documents").insert(doc_payload).execute(),
+                    "upsert_document",
+                    lambda: self._table("documents").upsert(doc_payload, on_conflict="document_key").execute(),
                 )
                 doc_id = (resp.data or [{}])[0]["id"]
 
-            # Insert Sections (hierarchical H2-H6, needed for RLS chunk -> section join)
+            # Insert Sections (bulk if possible)
             section_id_map: dict[str, str] = {}  # old temp id -> new db id
-            for sec in doc.sections:
-                sec_payload = {
-                    "document_id": doc_id,
-                    "heading": sec.heading,
-                    "level": sec.level,
-                    "sort_order": sec.sort_order,
-                    "metadata": sec.metadata,
-                }
-                # resolve parent
-                if sec.parent_section_id and sec.parent_section_id in section_id_map:
-                    sec_payload["parent_section_id"] = section_id_map[sec.parent_section_id]
+            if doc.sections:
+                sec_payloads = [
+                    {
+                        "document_id": doc_id,
+                        "heading": sec.heading,
+                        "level": sec.level,
+                        "sort_order": sec.sort_order,
+                        "metadata": sec.metadata,
+                    }
+                    for sec in doc.sections
+                ]
                 resp_sec = run_with_retry(
-                    "insert_section",
-                    lambda p=sec_payload: self._table("document_sections").insert(p).execute(),  # type: ignore[misc]
+                    "bulk_upsert_sections",
+                    lambda p=sec_payloads: self._table("document_sections").upsert(p, on_conflict="document_id,sort_order").execute(),  # type: ignore[misc]
                 )
-                new_id = (resp_sec.data or [{}])[0].get("id")
-                if new_id:
-                    section_id_map[sec.id] = new_id
+                for sec, row in zip(doc.sections, resp_sec.data or []):
+                    if isinstance(row, dict) and row.get("id"):
+                        section_id_map[sec.id] = row["id"]
 
-            # Insert Chunks (bulk insert to eliminate N+1 HTTP queries)
+            # Insert Chunks (bulk upsert to guarantee idempotency across parallel threads)
             chunks = doc_chunks[doc.document_key]
             first_section_db_id = next(iter(section_id_map.values()), None)
             chunk_payloads = []
@@ -318,9 +334,10 @@ class DocumentSyncer:
                 )
             if chunk_payloads:
                 run_with_retry(
-                    "bulk_insert_chunks",
-                    lambda payload=chunk_payloads: self._table("chunks").insert(payload).execute(),  # type: ignore[misc]
+                    "bulk_upsert_chunks",
+                    lambda payload=chunk_payloads: self._table("chunks").upsert(payload, on_conflict="document_id,chunk_index").execute(),  # type: ignore[misc]
                 )
+
 
             # Insert Facets (bulk upsert & link)
             if doc.facets:

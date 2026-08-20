@@ -97,12 +97,52 @@ class EasyRagClient:
         kb_token: str | None = None,
         match_count: int = 5,
         facet_keys: Sequence[str] | None = None,
+        candidate_count: int | None = None,
+        rrf_k: int | None = None,
+        vector_weight: float | None = None,
+        text_weight: float | None = None,
+        fts_config: str | None = None,
+        min_vector_similarity: float | None = None,
         use_rls: bool | None = None,
+        expand_context: str | None = None,
     ) -> list[SearchResult]:
+        resolved_cand = candidate_count if candidate_count is not None else self.config.candidate_count
+        resolved_rrf_k = rrf_k if rrf_k is not None else self.config.rrf_k
+        resolved_v_weight = vector_weight if vector_weight is not None else self.config.vector_weight
+        resolved_t_weight = text_weight if text_weight is not None else self.config.text_weight
+        resolved_fts_cfg = fts_config if fts_config is not None else self.config.fts_config
+        resolved_min_sim = min_vector_similarity if min_vector_similarity is not None else self.config.min_vector_similarity
+
         if self.use_rls or use_rls or (kb_token is None and not self.config.knowledgebase_access_token):
-            return self.retrieval.search_hybrid(query=query, kb_token=None, match_count=match_count, facet_keys=facet_keys, use_rls=True)
+            return self.retrieval.search_hybrid(
+                query=query,
+                kb_token=None,
+                match_count=match_count,
+                facet_keys=facet_keys,
+                candidate_count=resolved_cand,
+                rrf_k=resolved_rrf_k,
+                vector_weight=resolved_v_weight,
+                text_weight=resolved_t_weight,
+                fts_config=resolved_fts_cfg,
+                min_vector_similarity=resolved_min_sim,
+                use_rls=True,
+                expand_context=expand_context,
+            )
         token: str = kb_token or self.config.knowledgebase_access_token
-        return self.retrieval.search_hybrid(query=query, kb_token=token, match_count=match_count, facet_keys=facet_keys, use_rls=False)
+        return self.retrieval.search_hybrid(
+            query=query,
+            kb_token=token,
+            match_count=match_count,
+            facet_keys=facet_keys,
+            candidate_count=resolved_cand,
+            rrf_k=resolved_rrf_k,
+            vector_weight=resolved_v_weight,
+            text_weight=resolved_t_weight,
+            fts_config=resolved_fts_cfg,
+            min_vector_similarity=resolved_min_sim,
+            use_rls=False,
+            expand_context=expand_context,
+        )
 
     def search_vector(
         self,
@@ -110,12 +150,31 @@ class EasyRagClient:
         kb_token: str | None = None,
         match_count: int = 5,
         facet_keys: Sequence[str] | None = None,
+        min_vector_similarity: float | None = None,
         use_rls: bool | None = None,
+        expand_context: str | None = None,
     ) -> list[SearchResult]:
+        resolved_min_sim = min_vector_similarity if min_vector_similarity is not None else self.config.min_vector_similarity
         if self.use_rls or use_rls or (kb_token is None and not self.config.knowledgebase_access_token):
-            return self.retrieval.search_vector(query=query, kb_token=None, match_count=match_count, facet_keys=facet_keys, use_rls=True)
+            return self.retrieval.search_vector(
+                query=query,
+                kb_token=None,
+                match_count=match_count,
+                facet_keys=facet_keys,
+                min_vector_similarity=resolved_min_sim,
+                use_rls=True,
+                expand_context=expand_context,
+            )
         token = kb_token or self.config.knowledgebase_access_token
-        return self.retrieval.search_vector(query=query, kb_token=token, match_count=match_count, facet_keys=facet_keys, use_rls=False)
+        return self.retrieval.search_vector(
+            query=query,
+            kb_token=token,
+            match_count=match_count,
+            facet_keys=facet_keys,
+            min_vector_similarity=resolved_min_sim,
+            use_rls=False,
+            expand_context=expand_context,
+        )
 
     def search_fts(
         self,
@@ -123,23 +182,45 @@ class EasyRagClient:
         kb_token: str | None = None,
         match_count: int = 5,
         facet_keys: Sequence[str] | None = None,
+        fts_config: str | None = None,
         use_rls: bool | None = None,
+        expand_context: str | None = None,
     ) -> list[SearchResult]:
+        resolved_fts_cfg = fts_config if fts_config is not None else self.config.fts_config
         if self.use_rls or use_rls or (kb_token is None and not self.config.knowledgebase_access_token):
-            return self.retrieval.search_fts(query=query, kb_token=None, match_count=match_count, facet_keys=facet_keys, use_rls=True)
+            return self.retrieval.search_fts(
+                query=query,
+                kb_token=None,
+                match_count=match_count,
+                facet_keys=facet_keys,
+                fts_config=resolved_fts_cfg,
+                use_rls=True,
+                expand_context=expand_context,
+            )
         token = kb_token or self.config.knowledgebase_access_token
-        return self.retrieval.search_fts(query=query, kb_token=token, match_count=match_count, facet_keys=facet_keys, use_rls=False)
+        return self.retrieval.search_fts(
+            query=query,
+            kb_token=token,
+            match_count=match_count,
+            facet_keys=facet_keys,
+            fts_config=resolved_fts_cfg,
+            use_rls=False,
+            expand_context=expand_context,
+        )
+
 
     def sync_directory(
         self,
         source_dir: Path | str,
         pattern: str | None = None,
         limit: int | None = None,
+        batch_size: int = 20,
         owner_id: str | None = None,
         visibility: str = "private",
         enable_chunking: bool | None = None,
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
+        max_workers: int = 4,
     ) -> dict[str, Any]:
         if not self.syncer:
             raise RuntimeError("DocumentSyncer requires an explicit embedding_provider (inject via connectors)")
@@ -147,12 +228,16 @@ class EasyRagClient:
             source_root=Path(source_dir),
             pattern=pattern,
             limit=limit,
+            batch_size=batch_size,
             owner_id=owner_id,
             visibility=visibility,
             enable_chunking=enable_chunking,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
+            max_workers=max_workers,
         )
+
+
 
 
 class AsyncEasyRagClient:
@@ -220,12 +305,52 @@ class AsyncEasyRagClient:
         kb_token: str | None = None,
         match_count: int = 5,
         facet_keys: Sequence[str] | None = None,
+        candidate_count: int | None = None,
+        rrf_k: int | None = None,
+        vector_weight: float | None = None,
+        text_weight: float | None = None,
+        fts_config: str | None = None,
+        min_vector_similarity: float | None = None,
         use_rls: bool | None = None,
+        expand_context: str | None = None,
     ) -> list[SearchResult]:
+        resolved_cand = candidate_count if candidate_count is not None else self.config.candidate_count
+        resolved_rrf_k = rrf_k if rrf_k is not None else self.config.rrf_k
+        resolved_v_weight = vector_weight if vector_weight is not None else self.config.vector_weight
+        resolved_t_weight = text_weight if text_weight is not None else self.config.text_weight
+        resolved_fts_cfg = fts_config if fts_config is not None else self.config.fts_config
+        resolved_min_sim = min_vector_similarity if min_vector_similarity is not None else self.config.min_vector_similarity
+
         if self.use_rls or use_rls or (kb_token is None and not self.config.knowledgebase_access_token):
-            return await self.retrieval.search_hybrid(query=query, kb_token=None, match_count=match_count, facet_keys=facet_keys, use_rls=True)
+            return await self.retrieval.search_hybrid(
+                query=query,
+                kb_token=None,
+                match_count=match_count,
+                facet_keys=facet_keys,
+                candidate_count=resolved_cand,
+                rrf_k=resolved_rrf_k,
+                vector_weight=resolved_v_weight,
+                text_weight=resolved_t_weight,
+                fts_config=resolved_fts_cfg,
+                min_vector_similarity=resolved_min_sim,
+                use_rls=True,
+                expand_context=expand_context,
+            )
         token: str = kb_token or self.config.knowledgebase_access_token
-        return await self.retrieval.search_hybrid(query=query, kb_token=token, match_count=match_count, facet_keys=facet_keys, use_rls=False)
+        return await self.retrieval.search_hybrid(
+            query=query,
+            kb_token=token,
+            match_count=match_count,
+            facet_keys=facet_keys,
+            candidate_count=resolved_cand,
+            rrf_k=resolved_rrf_k,
+            vector_weight=resolved_v_weight,
+            text_weight=resolved_t_weight,
+            fts_config=resolved_fts_cfg,
+            min_vector_similarity=resolved_min_sim,
+            use_rls=False,
+            expand_context=expand_context,
+        )
 
     async def search_vector(
         self,
@@ -233,12 +358,31 @@ class AsyncEasyRagClient:
         kb_token: str | None = None,
         match_count: int = 5,
         facet_keys: Sequence[str] | None = None,
+        min_vector_similarity: float | None = None,
         use_rls: bool | None = None,
+        expand_context: str | None = None,
     ) -> list[SearchResult]:
+        resolved_min_sim = min_vector_similarity if min_vector_similarity is not None else self.config.min_vector_similarity
         if self.use_rls or use_rls or (kb_token is None and not self.config.knowledgebase_access_token):
-            return await self.retrieval.search_vector(query=query, kb_token=None, match_count=match_count, facet_keys=facet_keys, use_rls=True)
+            return await self.retrieval.search_vector(
+                query=query,
+                kb_token=None,
+                match_count=match_count,
+                facet_keys=facet_keys,
+                min_vector_similarity=resolved_min_sim,
+                use_rls=True,
+                expand_context=expand_context,
+            )
         token = kb_token or self.config.knowledgebase_access_token
-        return await self.retrieval.search_vector(query=query, kb_token=token, match_count=match_count, facet_keys=facet_keys, use_rls=False)
+        return await self.retrieval.search_vector(
+            query=query,
+            kb_token=token,
+            match_count=match_count,
+            facet_keys=facet_keys,
+            min_vector_similarity=resolved_min_sim,
+            use_rls=False,
+            expand_context=expand_context,
+        )
 
     async def search_fts(
         self,
@@ -246,10 +390,31 @@ class AsyncEasyRagClient:
         kb_token: str | None = None,
         match_count: int = 5,
         facet_keys: Sequence[str] | None = None,
+        fts_config: str | None = None,
         use_rls: bool | None = None,
+        expand_context: str | None = None,
     ) -> list[SearchResult]:
+        resolved_fts_cfg = fts_config if fts_config is not None else self.config.fts_config
         if self.use_rls or use_rls or (kb_token is None and not self.config.knowledgebase_access_token):
-            return await self.retrieval.search_fts(query=query, kb_token=None, match_count=match_count, facet_keys=facet_keys, use_rls=True)
+            return await self.retrieval.search_fts(
+                query=query,
+                kb_token=None,
+                match_count=match_count,
+                facet_keys=facet_keys,
+                fts_config=resolved_fts_cfg,
+                use_rls=True,
+                expand_context=expand_context,
+            )
         token = kb_token or self.config.knowledgebase_access_token
-        return await self.retrieval.search_fts(query=query, kb_token=token, match_count=match_count, facet_keys=facet_keys, use_rls=False)
+        return await self.retrieval.search_fts(
+            query=query,
+            kb_token=token,
+            match_count=match_count,
+            facet_keys=facet_keys,
+            fts_config=resolved_fts_cfg,
+            use_rls=False,
+            expand_context=expand_context,
+        )
+
+
 

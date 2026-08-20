@@ -51,6 +51,12 @@ class EasyRagConfig:
     openai_api_key: str
     openai_endpoint: str | None
     openai_api_version: str | None
+    fts_config: str = "english"
+    rrf_k: int = 60
+    vector_weight: float = 1.0
+    text_weight: float = 1.0
+    candidate_count: int | None = None
+    min_vector_similarity: float | None = None
 
     @classmethod
     def from_env(cls) -> EasyRagConfig:
@@ -95,6 +101,12 @@ class EasyRagConfig:
         emb_provider = "azure" if emb_endpoint and "azure" in emb_endpoint else "openai_like"
         embedding = ProviderConfig(provider=emb_provider, model=emb_model, endpoint=emb_endpoint, api_key=emb_key, api_version=llm_version)
 
+        cand_count_env = os.getenv("KNOWLEDGEBASE_CANDIDATE_COUNT")
+        cand_count = int(cand_count_env) if cand_count_env and cand_count_env.isdigit() else None
+
+        min_sim_env = os.getenv("KNOWLEDGEBASE_MIN_VECTOR_SIMILARITY")
+        min_sim = float(min_sim_env) if min_sim_env is not None and min_sim_env != "" else None
+
         return cls(
             supabase_url=os.getenv("SUPABASE_URL", ""),
             supabase_service_role_key=service_key,
@@ -118,6 +130,12 @@ class EasyRagConfig:
             openai_api_key=llm_key,
             openai_endpoint=llm_endpoint,
             openai_api_version=llm_version,
+            fts_config=os.getenv("KNOWLEDGEBASE_FTS_CONFIG", "english"),
+            rrf_k=int(os.getenv("KNOWLEDGEBASE_RRF_K", "60")),
+            vector_weight=float(os.getenv("KNOWLEDGEBASE_VECTOR_WEIGHT", "1.0")),
+            text_weight=float(os.getenv("KNOWLEDGEBASE_TEXT_WEIGHT", "1.0")),
+            candidate_count=cand_count,
+            min_vector_similarity=min_sim,
         )
 
 

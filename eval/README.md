@@ -1,79 +1,47 @@
-# Eval & Benchmark Framework — Portable RAG Evaluation
+# Supabase Easy RAG — Evaluation & Benchmark Suite
 
-Portable `eval` framework for evaluating RAG pipelines and Needle-in-a-Haystack (NIAH) benchmarks. Works completely locally (offline `--mock` mode), in CI/CD pipelines, and against live Supabase PostgreSQL + pgvector databases.
-
----
-
-## 🪡 Needle-in-a-Haystack (NIAH) Benchmark
-
-The benchmark tests how accurately the hybrid/vector retriever retrieves small isolated facts ("needles") hidden inside larger background documents ("haystack").
-
-### Corpus Structure
-Files are located in `eval/data/haystack/`:
-- `needles/` — Documents containing specific target facts (e.g. activation keys `PASSPHRASE_STARLIGHT_9842`, deal amounts `$74.35 million`, timeouts `POSTGRES_STATEMENT_TIMEOUT_MS=14200`, dosages `35mg/kg`).
-- `distractors/` — Background articles (Kubernetes cloud infrastructure, HR policies, B-Tree indexes, LoRA fine-tuning) introducing semantic noise.
-
-### 1. Running NIAH Benchmark (Offline / Mock)
-```bash
-uv run python eval/run_niah.py --dataset eval/dataset_niah.json --mock
-```
-
-### 2. Running Against Live Supabase Instance
-```bash
-# 1. Sync haystack corpus files to Supabase
-uv run python -m supabase_easy_rag.cli sync eval/data/haystack --public
-
-# 2. Run benchmark in live mode
-uv run python eval/run_niah.py --dataset eval/dataset_niah.json --live
-```
+This directory contains the standardized evaluation and benchmarking framework for `supabase-easy-rag`.
 
 ---
 
-## ⚙️ Synthetic Dataset Generator (Depth Variations)
+## 🚀 Quick Evaluation Run
 
-The script `eval/generate_dataset.py` generates datasets by embedding needles at specific relative document depths (0%, 25%, 50%, 75%, 100%) to test for the *Lost in the Middle* effect:
+To run the complete multilingual benchmark against your connected Supabase PostgreSQL instance:
 
 ```bash
-# Generate dataset with varied needle depth
-uv run python eval/generate_dataset.py
+uv run python eval/benchmark.py --workers 8
+```
 
-# Run benchmark on synthetic dataset
-uv run python eval/run_niah.py --dataset eval/dataset_niah_synthetic.json
+This will:
+1. Load / fetch authentic validation articles and human questions from the **Google Research TyDi QA** dataset.
+2. Synchronize documents in parallel using `EasyRagClient.sync_directory()`.
+3. Evaluate hybrid retrieval accuracy across all 11 languages (Arabic, Russian, Finnish, Telugu, Indonesian, Swahili, English, Korean, Japanese, Bengali, Thai).
+4. Compute **Hit Rate @ 1, 3, 5, 10**, **Mean Reciprocal Rank (MRR)**, and **Answer Span Recall @ 5**.
+5. Save markdown and JSON reports to `eval/output/`.
+
+---
+
+## 📊 CLI Options
+
+```bash
+# Run benchmark on custom corpus and dataset
+uv run python eval/benchmark.py --corpus-dir ./my_docs --dataset ./my_dataset.json --workers 8
+
+# Specify custom output directory
+uv run python eval/benchmark.py --output ./eval/custom_output
 ```
 
 ---
 
-## 📊 Standard Eval Metrics (Hit Rate, MRR, Keyword Recall)
+## 📁 Directory Structure
 
-### Measured Metrics:
-- **Hit Rate / Recall@k** — Target document or fact presence in top-k results.
-- **MRR (Mean Reciprocal Rank)** — \(1 / \text{rank}\) of the first relevant chunk retrieved.
-- **Keyword Recall** — Percentage of target keywords present in retrieved chunks.
-- **Latency** — Query search execution time in milliseconds.
-
-### Running Standard Evaluation:
-```bash
-# Mock mode
-uv run python eval/evaluate.py --mock --output eval/report.json
-
-# Live Supabase mode
-uv run python eval/evaluate.py --k 5 --output eval/report.json
-cat eval/report.json
 ```
-
----
-
-## 📁 Dataset Schema (`dataset_niah.json`)
-
-Record format:
-```json
-{
-  "id": "niah_01",
-  "question": "What is the emergency activation passkey for Project Starlight cluster fra-1-edge?",
-  "expected_document_key": "needles/starlight_passkey.md",
-  "expected_keywords": ["PASSPHRASE_STARLIGHT_9842", "9443", "fra-1-edge"],
-  "needle_fact": "PASSPHRASE_STARLIGHT_9842",
-  "mode": "hybrid"
-}
+eval/
+├── README.md                 # This documentation
+├── benchmark.py              # Unified evaluation and benchmarking CLI
+├── corpora/
+│   └── fetch_tydiqa.py       # Google Research TyDi QA dataset fetcher
+└── output/
+    ├── BENCHMARK_REPORT.md   # Generated Markdown report
+    └── benchmark_report.json # Detailed evaluation metrics JSON
 ```
-

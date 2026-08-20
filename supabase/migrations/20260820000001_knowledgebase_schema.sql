@@ -19,8 +19,6 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- 1. Documents Table
--- owner_id enables RLS per Supabase "RAG with Permissions" guide:
---   documents.owner_id references auth.users(id) default auth.uid()
 CREATE TABLE IF NOT EXISTS knowledgebase.documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     document_key TEXT NOT NULL UNIQUE,
@@ -33,8 +31,7 @@ CREATE TABLE IF NOT EXISTS knowledgebase.documents (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 1b. Document Owners Join Table (many-to-many, alternative scenario from guide)
--- Use this when a document is owned by multiple users.
+-- 1b. Document Owners Join Table (many-to-many)
 CREATE TABLE IF NOT EXISTS knowledgebase.document_owners (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id UUID NOT NULL REFERENCES knowledgebase.documents(id) ON DELETE CASCADE,
@@ -67,7 +64,7 @@ CREATE TABLE IF NOT EXISTS knowledgebase.chunks (
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     token_count INT,
     char_count INT,
-    embedding VECTOR(1536), -- Configurable dimensions via: easy-rag init-sql --dimensions <DIM>
+    embedding VECTOR(1536),
     search_vector tsvector,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -110,8 +107,7 @@ CREATE TABLE IF NOT EXISTS knowledgebase.ingestion_runs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 7. Access Tokens Table (Granular RAG authentication for service_role / machine-to-machine)
--- For end-user RLS use auth.uid() directly; tokens remain for backend jobs & legacy.
+-- 7. Access Tokens Table
 CREATE TABLE IF NOT EXISTS knowledgebase.access_tokens (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     token_name TEXT NOT NULL,
@@ -135,7 +131,6 @@ CREATE TABLE IF NOT EXISTS knowledgebase.access_token_audit (
 );
 
 -- Function: Compute Weighted tsvector (A: Title, B: Section Heading, D: Content)
--- Supports dynamic language / fts_config from metadata with safe fallback to 'simple'
 CREATE OR REPLACE FUNCTION knowledgebase.chunks_search_vector_trigger()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -245,7 +240,6 @@ BEFORE INSERT OR UPDATE OF document_id, section_id, content, metadata
 ON knowledgebase.chunks
 FOR EACH ROW EXECUTE FUNCTION knowledgebase.chunks_search_vector_trigger();
 
-
 DROP TRIGGER IF EXISTS trigger_kb_documents_title_update ON knowledgebase.documents;
 CREATE TRIGGER trigger_kb_documents_title_update
 AFTER UPDATE OF title ON knowledgebase.documents
@@ -256,11 +250,7 @@ CREATE TRIGGER trigger_kb_sections_heading_update
 AFTER UPDATE OF heading ON knowledgebase.document_sections
 FOR EACH ROW EXECUTE FUNCTION knowledgebase.sections_heading_update_trigger();
 
--- ============================================================================
--- Row Level Security (RLS) - Fine-Grained Access Control for RAG
--- Based on https://supabase.com/docs/guides/ai/rag-with-permissions
--- ============================================================================
-
+-- Row Level Security (RLS)
 ALTER TABLE knowledgebase.documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE knowledgebase.document_owners ENABLE ROW LEVEL SECURITY;
 ALTER TABLE knowledgebase.document_sections ENABLE ROW LEVEL SECURITY;
@@ -276,7 +266,7 @@ GRANT USAGE ON SCHEMA knowledgebase TO authenticated;
 GRANT USAGE ON SCHEMA knowledgebase TO service_role;
 GRANT USAGE ON SCHEMA knowledgebase TO anon;
 
--- Grants: service_role bypasses RLS - full access for backend ingestion & token RPCs
+-- Grants: service_role bypasses RLS
 GRANT ALL ON ALL TABLES IN SCHEMA knowledgebase TO service_role;
 GRANT ALL ON ALL SEQUENCES IN SCHEMA knowledgebase TO service_role;
 
@@ -289,13 +279,9 @@ GRANT SELECT ON knowledgebase.document_sections TO authenticated;
 GRANT SELECT ON knowledgebase.chunks TO authenticated;
 GRANT SELECT ON knowledgebase.facets TO authenticated;
 GRANT SELECT ON knowledgebase.document_facets TO authenticated;
--- authenticated can also read facets/navigation without ownership check
 GRANT SELECT ON knowledgebase.facets TO anon;
 
--- Helper: check if current user owns document (single-owner + multi-owner + public fallback)
--- Public documents: owner_id IS NULL and no entry in document_owners => visible to all authenticated
-
--- Policy: documents - users can read own docs + public docs + shared via document_owners
+-- Policy: documents
 DROP POLICY IF EXISTS "Users can query their own documents" ON knowledgebase.documents;
 CREATE POLICY "Users can query their own documents"
 ON knowledgebase.documents FOR SELECT TO authenticated USING (
@@ -331,15 +317,14 @@ ON knowledgebase.documents FOR DELETE TO authenticated USING (
   )
 );
 
--- Policy: document_owners - user can see ownership rows for docs they are member of
+-- Policy: document_owners
 DROP POLICY IF EXISTS "Users can query document_owners" ON knowledgebase.document_owners;
 CREATE POLICY "Users can query document_owners"
 ON knowledgebase.document_owners FOR SELECT TO authenticated USING (
   owner_id = auth.uid()
 );
 
--- Policy: chunks / document_sections - restrict via linked document ownership (core RAG pattern)
--- This mirrors the Supabase guide: document_sections filtered via documents.owner_id
+-- Policy: chunks / document_sections
 DROP POLICY IF EXISTS "Users can query their own document sections" ON knowledgebase.document_sections;
 CREATE POLICY "Users can query their own document sections"
 ON knowledgebase.document_sections FOR SELECT TO authenticated USING (
@@ -368,22 +353,12 @@ ON knowledgebase.chunks FOR SELECT TO authenticated USING (
   )
 );
 
--- Optional: Alternative policy for external user source via FDW or custom JWT claim
--- Uncomment if you use direct Postgres connection with app.current_user_id:
--- CREATE POLICY "Users can query via app.current_user_id"
--- ON knowledgebase.chunks FOR SELECT TO authenticated USING (
---   document_id IN (
---     SELECT id FROM knowledgebase.documents
---     WHERE owner_id::text = current_setting('app.current_user_id', true)
---   )
--- );
-
--- Facets: public read (no ownership), restrict writes to service_role (no policy for authenticated insert)
+-- Facets: public read
 DROP POLICY IF EXISTS "Anyone can read facets" ON knowledgebase.facets;
 CREATE POLICY "Anyone can read facets"
 ON knowledgebase.facets FOR SELECT TO authenticated, anon USING (true);
 
--- Document facets: restricted via linked document ownership (prevents metadata leakage)
+-- Document facets
 DROP POLICY IF EXISTS "Users can query their own document facets" ON knowledgebase.document_facets;
 CREATE POLICY "Users can query their own document facets"
 ON knowledgebase.document_facets FOR SELECT TO authenticated USING (
@@ -397,6 +372,3 @@ ON knowledgebase.document_facets FOR SELECT TO authenticated USING (
        )
   )
 );
-
--- Ingestion / tokens / audit: service_role only (no authenticated policies => no access)
--- Intentionally no policies for authenticated on these tables.

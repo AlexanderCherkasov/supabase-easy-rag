@@ -16,7 +16,6 @@ AS $$
 $$;
 
 -- Security Assertion Function: Validates Token & Audit Trail
--- If p_kb_token is null/empty but auth.uid() exists -> RLS mode, no token check.
 CREATE OR REPLACE FUNCTION knowledgebase.assert_retrieval_access(p_kb_token TEXT)
 RETURNS UUID
 LANGUAGE plpgsql
@@ -29,10 +28,8 @@ DECLARE
 BEGIN
     v_role := COALESCE(current_setting('request.jwt.claim.role', true), 'service_role');
 
-    -- RLS mode: no token, but authenticated user via JWT -> skip token check
-    -- Caller relies on RLS policies (documents.owner_id = auth.uid())
     IF (p_kb_token IS NULL OR btrim(p_kb_token) = '') AND auth.uid() IS NOT NULL THEN
-        RETURN NULL; -- signal RLS path
+        RETURN NULL;
     END IF;
 
     IF p_kb_token IS NULL OR btrim(p_kb_token) = '' THEN
@@ -89,7 +86,7 @@ BEGIN
 END;
 $$;
 
--- Helper: check if request is RLS-authenticated (auth.uid() exists) vs token
+-- Helper: check if request is RLS-authenticated
 CREATE OR REPLACE FUNCTION knowledgebase.is_rls_authenticated()
 RETURNS BOOLEAN
 LANGUAGE sql
@@ -98,11 +95,7 @@ AS $$
     SELECT auth.uid() IS NOT NULL;
 $$;
 
--- ============================================================================
--- 1. Vector Search RPC — supports token OR RLS
--- =========================================================================-- ============================================================================
--- 1. Vector Search RPC — supports token OR RLS
--- ============================================================================
+-- 1. Vector Search RPC
 CREATE OR REPLACE FUNCTION knowledgebase.match_chunks_by_embedding(
     p_kb_token TEXT,
     p_query_embedding VECTOR,
@@ -140,7 +133,6 @@ BEGIN
         RAISE EXCEPTION 'Query embedding is required';
     END IF;
 
-    -- Enable pgvector 0.7.0+ iterative index scan for filtered ANN
     BEGIN
         PERFORM set_config('hnsw.iterative_scan', 'relaxed_order', true);
         PERFORM set_config('hnsw.ef_search', GREATEST(COALESCE(p_ef_search, COALESCE(p_match_count, 5) * 10), 40)::text, true);
@@ -205,7 +197,6 @@ BEGIN
 END;
 $$;
 
--- RLS-only variant (SECURITY INVOKER — respects RLS natively, no token needed)
 CREATE OR REPLACE FUNCTION knowledgebase.match_chunks_by_embedding_rls(
     p_query_embedding VECTOR,
     p_match_count INT DEFAULT 5,
@@ -236,7 +227,6 @@ BEGIN
         RAISE EXCEPTION 'Query embedding is required';
     END IF;
 
-    -- Enable pgvector 0.7.0+ iterative index scan for filtered ANN
     BEGIN
         PERFORM set_config('hnsw.iterative_scan', 'relaxed_order', true);
         PERFORM set_config('hnsw.ef_search', GREATEST(COALESCE(p_ef_search, COALESCE(p_match_count, 5) * 10), 40)::text, true);
@@ -276,9 +266,7 @@ BEGIN
 END;
 $$;
 
--- ============================================================================
--- 2. Full-Text Search (FTS) RPC — supports token OR RLS
--- ============================================================================
+-- 2. Full-Text Search (FTS) RPC
 CREATE OR REPLACE FUNCTION knowledgebase.search_chunks_full_text(
     p_kb_token TEXT,
     p_query TEXT,
@@ -323,17 +311,14 @@ BEGIN
         v_regconfig := 'simple'::regconfig;
     END;
 
-    -- Adaptive tsquery: try websearch_to_tsquery first; if no match or empty, use plainto_tsquery
     v_tsquery := websearch_to_tsquery(v_regconfig, p_query);
     IF v_tsquery IS NULL OR length(v_tsquery::text) = 0 THEN
         v_tsquery := plainto_tsquery(v_regconfig, p_query);
     END IF;
 
-    -- If still empty or query contains terms, fallback to simple regconfig or OR-connected query
     IF v_tsquery IS NULL OR length(v_tsquery::text) = 0 THEN
         v_tsquery := plainto_tsquery('simple'::regconfig, p_query);
     END IF;
-
 
     RETURN QUERY
     WITH candidates AS (
@@ -429,17 +414,14 @@ BEGIN
         v_regconfig := 'simple'::regconfig;
     END;
 
-    -- Adaptive tsquery: try websearch_to_tsquery first; if no match or empty, use plainto_tsquery
     v_tsquery := websearch_to_tsquery(v_regconfig, p_query);
     IF v_tsquery IS NULL OR length(v_tsquery::text) = 0 THEN
         v_tsquery := plainto_tsquery(v_regconfig, p_query);
     END IF;
 
-    -- If still empty, fallback to simple regconfig
     IF v_tsquery IS NULL OR length(v_tsquery::text) = 0 THEN
         v_tsquery := plainto_tsquery('simple'::regconfig, p_query);
     END IF;
-
 
     RETURN QUERY
     WITH candidates AS (
@@ -461,7 +443,6 @@ BEGIN
             )
           )
         ORDER BY ts_rank(c.search_vector, v_tsquery) DESC, d.title ASC
-
         LIMIT GREATEST(COALESCE(p_match_count, 5), 1)
     )
     SELECT
@@ -473,9 +454,7 @@ BEGIN
 END;
 $$;
 
--- ============================================================================
--- 3. Hybrid Search RPC (Two-Stage Vector + FTS Candidates with RRF Fusion)
--- ============================================================================
+-- 3. Hybrid Search RPC
 CREATE OR REPLACE FUNCTION knowledgebase.search_chunks_hybrid(
     p_kb_token TEXT,
     p_query TEXT,
@@ -525,7 +504,6 @@ BEGIN
         RAISE EXCEPTION 'Query text or query embedding is required';
     END IF;
 
-    -- Candidate pool oversampling with configurable upper bound
     v_candidate_count := LEAST(COALESCE(p_candidate_count, GREATEST(COALESCE(p_match_count, 5) * 10, 50)), 500);
     v_rrf_k := GREATEST(COALESCE(p_rrf_k, 60), 1);
     v_vector_weight := GREATEST(COALESCE(p_vector_weight, 1.0), 0.0);
@@ -536,7 +514,6 @@ BEGIN
         v_regconfig := 'simple'::regconfig;
     END;
 
-    -- Enable pgvector 0.7.0+ iterative index scan for filtered ANN
     BEGIN
         PERFORM set_config('hnsw.iterative_scan', 'relaxed_order', true);
         PERFORM set_config('hnsw.ef_search', GREATEST(COALESCE(p_ef_search, v_candidate_count * 2), 40)::text, true);
@@ -553,7 +530,6 @@ BEGIN
             v_tsquery := plainto_tsquery('simple'::regconfig, p_query);
         END IF;
     END IF;
-
 
     RETURN QUERY
     WITH vector_candidates AS (
@@ -619,8 +595,6 @@ BEGIN
         ORDER BY ts_rank(c.search_vector, v_tsquery) DESC
         LIMIT v_candidate_count
     ),
-
-
     fused AS (
         SELECT
             COALESCE(vc.chunk_id, fc.chunk_id) AS chunk_id,
@@ -711,7 +685,6 @@ BEGIN
         v_regconfig := 'simple'::regconfig;
     END;
 
-    -- Enable pgvector 0.7.0+ iterative index scan for filtered ANN
     BEGIN
         PERFORM set_config('hnsw.iterative_scan', 'relaxed_order', true);
         PERFORM set_config('hnsw.ef_search', GREATEST(COALESCE(p_ef_search, v_candidate_count * 2), 40)::text, true);
@@ -728,7 +701,6 @@ BEGIN
             v_tsquery := plainto_tsquery('simple'::regconfig, p_query);
         END IF;
     END IF;
-
 
     RETURN QUERY
     WITH vector_candidates AS (
@@ -772,8 +744,6 @@ BEGIN
         ORDER BY ts_rank(c.search_vector, v_tsquery) DESC
         LIMIT v_candidate_count
     ),
-
-
     fused AS (
         SELECT
             COALESCE(vc.chunk_id, fc.chunk_id) AS chunk_id,
@@ -811,9 +781,7 @@ BEGIN
 END;
 $$;
 
--- ============================================================================
--- 4. Navigation Facets RPC — token OR RLS
--- ============================================================================
+-- 4. Navigation Facets RPC
 CREATE OR REPLACE FUNCTION knowledgebase.get_navigation_facets(
     p_kb_token TEXT,
     p_facet_type TEXT DEFAULT NULL
@@ -835,7 +803,6 @@ DECLARE
     v_token_id UUID;
 BEGIN
     v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
-    -- facets are public; no extra RLS filter needed
     RETURN QUERY
     SELECT
         f.id,
@@ -890,4 +857,3 @@ GRANT EXECUTE ON FUNCTION knowledgebase.is_rls_authenticated() TO authenticated,
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA knowledgebase TO authenticated, service_role;
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA knowledgebase FROM anon;
 GRANT EXECUTE ON FUNCTION knowledgebase.get_navigation_facets_rls(TEXT) TO anon;
-

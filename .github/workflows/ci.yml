@@ -8,8 +8,24 @@ on:
 
 jobs:
   test:
-    name: Test (Python ${{ matrix.python-version }})
+    name: Test & Postgres Integration (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
@@ -17,6 +33,19 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set up PostgreSQL Client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client
+
+      - name: Prepare Standalone Environment & Apply Standard Supabase Migrations
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -p 5432 -U postgres -d postgres -f sql/local_init/00_init_supabase_shim.sql
+          psql -h localhost -p 5432 -U postgres -d postgres -f sql/01_schema.sql
+          psql -h localhost -p 5432 -U postgres -d postgres -f sql/02_functions.sql
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -29,8 +58,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
-      - name: Run unit tests (offline, mocked)
+      - name: Run Test Suite (Offline Unit + Adversarial RLS + Filtered ANN + Real Postgres Integration)
         env:
+          CI: "true"
+          POSTGRES_URL: "postgresql://postgres:postgres@localhost:5432/postgres"
           SUPABASE_URL: "http://localhost:54321"
           SUPABASE_SERVICE_ROLE_KEY: "dummy-service-key"
           SUPABASE_ANON_KEY: "dummy-anon-key"
@@ -38,4 +69,8 @@ jobs:
           LLM_API_KEY: "sk-dummy-key"
           EMBEDDING_API_KEY: "sk-dummy-key"
         run: |
-          python -m pytest tests/ -v
+          python -m unittest discover tests -v
+
+      - name: Run Retrieval Ablation Study (Vector vs FTS vs Hybrid RRF)
+        run: |
+          python eval/ablation_study.py

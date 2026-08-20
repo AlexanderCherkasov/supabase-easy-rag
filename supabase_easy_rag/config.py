@@ -95,7 +95,7 @@ class EasyRagConfig:
         chat_mini = ProviderConfig(provider=chat_nano.provider, model=llm_mini_model, endpoint=llm_endpoint, api_key=llm_key, api_version=llm_version)
 
         # Embedding: re-use LLM endpoint/key if not set separately
-        emb_model = os.getenv("EMBEDDING_MODEL") or os.getenv("KNOWLEDGEBASE_EMBEDDING_MODEL") or os.getenv("AZURE_OPENAI_DEPLOYMENT_EMBEDDING") or "text-embedding-3-small"
+        emb_model = os.getenv("EMBEDDING_MODEL") or os.getenv("KNOWLEDGEBASE_EMBEDDING_MODEL") or os.getenv("AZURE_OPENAI_DEPLOYMENT_EMBEDDING") or "text-embedding-3-large"
         emb_endpoint = os.getenv("EMBEDDING_ENDPOINT") or os.getenv("KNOWLEDGEBASE_EMBEDDING_ENDPOINT") or os.getenv("AZURE_OPENAI_ENDPOINT_EMBEDDING") or llm_endpoint
         emb_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("KNOWLEDGEBASE_EMBEDDING_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY_EMBEDDING") or llm_key
         emb_provider = "azure" if emb_endpoint and "azure" in emb_endpoint else "openai_like"
@@ -106,6 +106,8 @@ class EasyRagConfig:
 
         min_sim_env = os.getenv("KNOWLEDGEBASE_MIN_VECTOR_SIMILARITY")
         min_sim = float(min_sim_env) if min_sim_env is not None and min_sim_env != "" else None
+
+        default_dim = "3072" if "large" in emb_model.lower() else "1536"
 
         return cls(
             supabase_url=os.getenv("SUPABASE_URL", ""),
@@ -120,7 +122,7 @@ class EasyRagConfig:
             azure_mini=chat_mini,
             azure_embedding=embedding,
             embedding_model=emb_model,
-            embedding_dim=int(os.getenv("KNOWLEDGEBASE_EMBEDDING_DIM", "1536")),
+            embedding_dim=int(os.getenv("KNOWLEDGEBASE_EMBEDDING_DIM", default_dim)),
             batch_size=int(os.getenv("KNOWLEDGEBASE_PROCESS_BATCH_SIZE", "20")),
             default_match_count=int(os.getenv("KNOWLEDGEBASE_DEFAULT_MATCH_COUNT", "5")),
             use_rls=use_rls_raw.lower() in ("1", "true", "yes", "on"),

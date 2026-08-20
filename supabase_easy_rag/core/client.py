@@ -221,6 +221,7 @@ class EasyRagClient:
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
         max_workers: int = 4,
+        force: bool = False,
     ) -> dict[str, Any]:
         if not self.syncer:
             raise RuntimeError("DocumentSyncer requires an explicit embedding_provider (inject via connectors)")
@@ -235,6 +236,7 @@ class EasyRagClient:
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             max_workers=max_workers,
+            force=force,
         )
 
 

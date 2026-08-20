@@ -5,8 +5,8 @@ If your Supabase database (`https://your-project.supabase.co`) is brand new, the
 ## Setup Steps (2 minutes)
 
 1. Open `https://supabase.com/dashboard/project/YOUR_PROJECT_REF/sql/new` (replace `YOUR_PROJECT_REF` with your project reference from `SUPABASE_URL`).
-2. Copy and run the entire content of `sql/01_schema.sql` (or `supabase/migrations/20260811000001_schema.sql`).
-3. Copy and run the entire content of `sql/02_functions.sql` (or `supabase/migrations/20260811000002_functions.sql`).
+2. Copy and run the entire content of `sql/01_schema.sql` (or generate via `easy-rag init-sql`).
+3. Copy and run the entire content of `sql/02_functions.sql`.
 4. Verify the database tables:
    ```sql
    select schema_name from information_schema.schemata where schema_name='knowledgebase';

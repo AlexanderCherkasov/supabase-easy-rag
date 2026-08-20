@@ -89,6 +89,7 @@ class DocumentSyncer:
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
         max_workers: int = 4,
+        force: bool = False,
     ) -> dict[str, Any]:
         """Sync markdown files. Owner handling per RAG with Permissions guide:
 
@@ -96,6 +97,7 @@ class DocumentSyncer:
         - visibility: 'private' (default, assign owner), 'public' (owner_id = NULL, readable by all authenticated)
         - enable_chunking: True to split into chunks, False to store whole doc as single chunk
         - max_workers: Number of parallel worker threads for batch ingestion
+        - force: If True, re-processes and re-chunks all documents regardless of checksum
         """
         source_root = source_root.resolve()
         markdown_files = sorted(p for p in source_root.rglob("*.md") if p.is_file())
@@ -147,13 +149,16 @@ class DocumentSyncer:
                     if isinstance(row, dict):
                         existing_map[row["document_key"]] = row
 
-            # 4. Filter only changed or new documents
-            changed_docs = [
-                doc
-                for doc in parsed_docs
-                if doc.document_key not in existing_map
-                or existing_map[doc.document_key].get("checksum") != doc.checksum
-            ]
+            # 4. Filter only changed or new documents (or all if force=True)
+            if force:
+                changed_docs = parsed_docs
+            else:
+                changed_docs = [
+                    doc
+                    for doc in parsed_docs
+                    if doc.document_key not in existing_map
+                    or existing_map[doc.document_key].get("checksum") != doc.checksum
+                ]
 
             files_changed = len(changed_docs)
 
@@ -285,6 +290,11 @@ class DocumentSyncer:
                     "update_document",
                     lambda: self._table("documents").update(doc_payload).eq("id", doc_id).execute(),
                 )
+                # Clean up any orphaned chunks from previous runs with different chunk sizes
+                run_with_retry(
+                    "clean_orphaned_chunks",
+                    lambda: self._table("chunks").delete().eq("document_id", doc_id).gte("chunk_index", len(chunks)).execute(),
+                )
             else:
                 resp = run_with_retry(
                     "upsert_document",
@@ -320,13 +330,16 @@ class DocumentSyncer:
             for ch in chunks:
                 emb = embeddings[embed_idx]
                 embed_idx += 1
+                chunk_meta = {**doc.metadata, "document_key": doc.document_key}
+                if doc.facet_path:
+                    chunk_meta["facet_path"] = doc.facet_path
                 chunk_payloads.append(
                     {
                         "document_id": doc_id,
                         "section_id": ch.section_id or first_section_db_id,
                         "chunk_index": ch.chunk_index,
                         "content": ch.content,
-                        "metadata": {**doc.metadata, "facet_path": doc.facet_path} if doc.facet_path else doc.metadata,
+                        "metadata": chunk_meta,
                         "token_count": ch.token_count,
                         "char_count": ch.char_count,
                         "embedding": list(emb),

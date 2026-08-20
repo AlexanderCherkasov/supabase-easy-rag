@@ -1,53 +1,53 @@
-# Supabase Easy RAG — Official Benchmark & Quality Report
+# Supabase Easy RAG — Benchmark & Quality Report
 
-Comprehensive quality evaluation and multilingual benchmark report for `supabase-easy-rag` (v0.2.0) evaluated against the **Google Research TyDi QA** benchmark across 11 typologically diverse languages.
+Comprehensive quality evaluation against the **Google Research TyDi QA** multilingual benchmark (5,077 queries, 4,488 documents, 11 languages).
 
 ---
 
-## 1. Executive Summary
-
-* **Database Engine**: PostgreSQL 17.6 on Supabase Cloud.
-* **Corpus Size**: **4,488 authentic documents** across 11 languages.
-* **Evaluation Queries**: **5,077 real human questions** with gold-standard answer spans.
-* **Ingestion Throughput**: **732.2 documents/second** (4,488 documents synchronized in 6.13 seconds with 8 parallel workers).
-* **Buffer Cache Hit Ratio**: **100.0%** (all vector and lexical indices served directly from RAM Shared Buffers).
-
-### Global Information Retrieval (IR) Quality:
+## 1. Ground-Truth Document Retrieval Metrics (Strict Document ID/Title Match)
 
 | Metric | Score | Description |
 | :--- | :---: | :--- |
-| **Hit Rate @ 1 (Top-1 Accuracy)** | **89.64%** | Ground-truth relevant document is ranked #1 in 89.6% of queries |
-| **Hit Rate @ 3 (Top-3 Accuracy)** | **92.71%** | Top-3 retrieval recall |
-| **Hit Rate @ 5 (Top-5 Accuracy)** | **93.52%** | Standard LLM context budget retrieval accuracy |
-| **Hit Rate @ 10 (Top-10 Accuracy)** | **93.91%** | Broad candidate recall |
-| **MRR (Mean Reciprocal Rank)** | **0.9128** | Average reciprocal rank across all 5,077 queries |
-| **Answer Span Recall @ 5** | **92.77%** | Exact fact-answer span is contained in the top-5 retrieved chunks |
+| **Document Hit Rate @ 1 (Top-1)** | **88.46%** | Ground-truth document ranked #1 |
+| **Document Hit Rate @ 3 (Top-3)** | **91.61%** | Ground-truth document in Top-3 chunks |
+| **Document Hit Rate @ 5 (Top-5)** | **92.34%** | Ground-truth document in Top-5 chunks |
+| **Document Hit Rate @ 10 (Top-10)** | **92.75%** | Ground-truth document in Top-10 chunks |
+| **Document MRR** | **0.9012** | Mean Reciprocal Rank on document retrieval |
 
 ---
 
-## 2. Multilingual Accuracy Breakdown (11 Languages)
+## 2. Fact / Answer Span Extraction Metrics
 
-| Language | Language Family | Queries | Hit Rate @ 1 | Hit Rate @ 5 | MRR | Answer Recall @ 5 |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Arabic** | Afroasiatic (Semitic) | 964 | **90.0%** | **93.8%** | **0.916** | **92.8%** |
-| **Finnish** | Uralic (Agglutinative) | 920 | **91.6%** | **94.6%** | **0.929** | **94.0%** |
-| **Russian** | Indo-European (Slavic) | 828 | **91.8%** | **94.0%** | **0.928** | **93.2%** |
-| **Telugu** | Dravidian | 668 | **90.7%** | **94.8%** | **0.924** | **94.6%** |
-| **Indonesian** | Austronesian | 499 | **92.2%** | **94.2%** | **0.929** | **93.8%** |
-| **Swahili** | Niger-Congo (Bantu) | 475 | **89.5%** | **94.1%** | **0.913** | **92.8%** |
-| **English** | Germanic | 278 | **86.7%** | **90.6%** | **0.883** | **90.3%** |
-| **Korean** | Koreanic | 194 | **75.3%** | **85.0%** | **0.793** | **83.0%** |
-| **Japanese** | Japonic | 139 | **82.7%** | **89.9%** | **0.863** | **89.2%** |
-| **Bengali** | Indo-Aryan | 111 | **77.5%** | **92.8%** | **0.843** | **90.1%** |
-| **Thai** | Kra-Dai | 1 | **100.0%** | **100.0%** | **1.000** | **100.0%** |
+| Metric | Score | Description |
+| :--- | :---: | :--- |
+| **Answer Span Recall @ 1** | **84.70%** | Gold answer span contained in Top-1 chunk |
+| **Answer Span Recall @ 5** | **91.90%** | Gold answer span contained in Top-5 chunks |
+| **Answer Span Recall @ 10** | **92.40%** | Gold answer span contained in Top-10 chunks |
 
 ---
 
-## 3. Search Architecture & Algorithmic Complexity
+## 3. Ingestion & Synchronization Performance
 
-1. **Two-Stage Hybrid Search (RRF)**:
-   * **Stage 1 (Vector Scan)**: $\mathcal{O}(\log N)$ HNSW index scan (`vector_cosine_ops`, $M=16$, $ef\_construction=64$).
-   * **Stage 2 (Lexical Scan)**: $\mathcal{O}(1)$ GIN index scan with Top-200 candidate pre-filtering and weighted term scoring (`A`: Title, `B`: Heading, `D`: Content).
-   * **Fusion**: In-memory Reciprocal Rank Fusion ($k=60$) combining ranks without full table scan or score normalization distortions.
-2. **Context Expansion**:
-   * Multi-scale retrieval decoupling: search by dense, high-accuracy chunks (400–600 tokens), with zero-copy expansion to full parent sections (up to 3,000+ tokens) for generation.
+| Metric | Value | Description |
+| :--- | :---: | :--- |
+| **Chunking Setup** | **400 chars (overlap 50)** | Sub-chunk splitting enabled |
+| **Sync Duration** | **6.89s** | Total synchronization time (16 workers) |
+| **Throughput** | **651.5 docs/sec** | Incremental Verification (0 changed, 4488 seen) |
+
+---
+
+## 4. Multilingual Breakdown Across 11 Languages
+
+| Language | Queries | Doc Hit @ 1 | Doc Hit @ 5 | Doc MRR | Answer Recall @ 5 |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Arabic** | 964 | **89.2%** | **92.8%** | **0.908** | **92.0%** |
+| **Finnish** | 920 | **90.0%** | **93.0%** | **0.913** | **92.9%** |
+| **Russian** | 828 | **91.5%** | **93.8%** | **0.926** | **93.2%** |
+| **Telugu** | 668 | **89.1%** | **92.8%** | **0.906** | **93.1%** |
+| **Indonesian** | 499 | **89.4%** | **91.8%** | **0.903** | **91.6%** |
+| **Swahili** | 475 | **87.4%** | **92.6%** | **0.895** | **91.6%** |
+| **English** | 278 | **87.1%** | **89.9%** | **0.883** | **91.0%** |
+| **Korean** | 194 | **75.8%** | **85.0%** | **0.795** | **83.0%** |
+| **Japanese** | 139 | **82.0%** | **89.2%** | **0.854** | **88.5%** |
+| **Bengali** | 111 | **76.6%** | **91.9%** | **0.834** | **90.1%** |
+| **Thai** | 1 | **100.0%** | **100.0%** | **1.000** | **100.0%** |

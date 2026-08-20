@@ -10,7 +10,7 @@ def main() -> None:
     # Explicit OpenAI connector — developer chooses
     embedding = OpenAIEmbeddingProvider(
         api_key="sk-...",
-        model="text-embedding-3-small",
+        model="text-embedding-3-large",
         base_url="https://api.openai.com/v1",
     )
     chat = OpenAIChatProvider(

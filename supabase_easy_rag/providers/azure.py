@@ -18,14 +18,16 @@ class AzureEmbeddingProvider(BaseEmbeddingProvider):
         endpoint: str,
         model: str,
         api_version: str = "2024-02-15-preview",
-        batch_size: int = 20,
-        batch_sleep: float = 0.2,
+        batch_size: int = 100,
+        batch_sleep: float = 0.0,
+        dimensions: int | None = None,
     ) -> None:
         if not api_key or not endpoint or not model:
             raise ValueError("AzureEmbeddingProvider requires api_key, endpoint, model")
         self.model: str = model
         self.batch_size: int = batch_size
         self.batch_sleep: float = batch_sleep
+        self.dimensions: int | None = dimensions
         self.client: AzureOpenAI = AzureOpenAI(api_key=api_key, azure_endpoint=endpoint, api_version=api_version)
 
     def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
@@ -35,7 +37,10 @@ class AzureEmbeddingProvider(BaseEmbeddingProvider):
         for start in range(0, len(texts), self.batch_size):
             # Guard against exceeding 8192 OpenAI token limit on giant passages (especially non-latin scripts)
             batch = [t[:6000] if len(t) > 6000 else t for t in texts[start : start + self.batch_size]]
-            resp = self.client.embeddings.create(model=self.model, input=batch)
+            kwargs: dict[str, Any] = {"model": self.model, "input": batch}
+            if self.dimensions is not None:
+                kwargs["dimensions"] = self.dimensions
+            resp = self.client.embeddings.create(**kwargs)
             out.extend([item.embedding for item in resp.data])
             if start + self.batch_size < len(texts) and self.batch_sleep > 0:
                 time.sleep(self.batch_sleep)

@@ -17,7 +17,7 @@ def main() -> None:
     embedding = AzureEmbeddingProvider(
         api_key=cfg.embedding.api_key,
         endpoint=cfg.embedding.endpoint or "",
-        model=cfg.embedding.model,  # text-embedding-3-small
+        model=cfg.embedding.model,  # text-embedding-3-large
     )
     chat = AzureChatProvider(
         api_key=cfg.chat_nano.api_key,

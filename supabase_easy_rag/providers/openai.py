@@ -17,14 +17,16 @@ class OpenAIEmbeddingProvider(BaseEmbeddingProvider):
         api_key: str,
         model: str,
         base_url: str | None = None,
-        batch_size: int = 20,
-        batch_sleep: float = 0.2,
+        batch_size: int = 100,
+        batch_sleep: float = 0.0,
+        dimensions: int | None = None,
     ) -> None:
         if not api_key or not model:
             raise ValueError("OpenAIEmbeddingProvider requires api_key, model")
         self.model: str = model
         self.batch_size: int = batch_size
         self.batch_sleep: float = batch_sleep
+        self.dimensions: int | None = dimensions
         if base_url:
             self.client: OpenAI = OpenAI(api_key=api_key, base_url=base_url)
         else:
@@ -36,9 +38,12 @@ class OpenAIEmbeddingProvider(BaseEmbeddingProvider):
         out: list[list[float]] = []
         for start in range(0, len(texts), self.batch_size):
             batch = list(texts[start : start + self.batch_size])
-            resp = self.client.embeddings.create(model=self.model, input=batch)
+            kwargs: dict[str, Any] = {"model": self.model, "input": batch}
+            if self.dimensions is not None:
+                kwargs["dimensions"] = self.dimensions
+            resp = self.client.embeddings.create(**kwargs)
             out.extend([item.embedding for item in resp.data])
-            if start + self.batch_size < len(texts):
+            if start + self.batch_size < len(texts) and self.batch_sleep > 0:
                 time.sleep(self.batch_sleep)
         return out
 

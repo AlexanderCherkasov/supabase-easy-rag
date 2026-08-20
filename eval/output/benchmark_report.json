@@ -1,0 +1,107 @@
+{
+  "total_queries": 5077,
+  "corpus_documents": 4488,
+  "chunking_config": {
+    "enabled": true,
+    "chunk_size": 400,
+    "chunk_overlap": 50
+  },
+  "ingestion_stats": {
+    "files_seen": 4488,
+    "files_changed": 0,
+    "sync_duration_seconds": 6.89,
+    "throughput_docs_per_sec": 651.5,
+    "mode": "incremental_verification"
+  },
+  "document_retrieval": {
+    "doc_hit_rate_at_1": 0.8846,
+    "doc_hit_rate_at_3": 0.9161,
+    "doc_hit_rate_at_5": 0.9234,
+    "doc_hit_rate_at_10": 0.9275,
+    "doc_mrr": 0.9012
+  },
+  "answer_span_extraction": {
+    "answer_recall_at_1": 0.847,
+    "answer_recall_at_5": 0.919,
+    "answer_recall_at_10": 0.924
+  },
+  "by_language": {
+    "arabic": {
+      "queries": 964,
+      "doc_hit_rate_at_1": 0.8921,
+      "doc_hit_rate_at_5": 0.9284,
+      "doc_mrr": 0.9082,
+      "answer_recall_at_5": 0.9201
+    },
+    "finnish": {
+      "queries": 920,
+      "doc_hit_rate_at_1": 0.9,
+      "doc_hit_rate_at_5": 0.9304,
+      "doc_mrr": 0.9131,
+      "answer_recall_at_5": 0.9293
+    },
+    "russian": {
+      "queries": 828,
+      "doc_hit_rate_at_1": 0.9155,
+      "doc_hit_rate_at_5": 0.9384,
+      "doc_mrr": 0.9263,
+      "answer_recall_at_5": 0.9324
+    },
+    "telugu": {
+      "queries": 668,
+      "doc_hit_rate_at_1": 0.8907,
+      "doc_hit_rate_at_5": 0.9281,
+      "doc_mrr": 0.9059,
+      "answer_recall_at_5": 0.9311
+    },
+    "indonesian": {
+      "queries": 499,
+      "doc_hit_rate_at_1": 0.8938,
+      "doc_hit_rate_at_5": 0.9178,
+      "doc_mrr": 0.9028,
+      "answer_recall_at_5": 0.9158
+    },
+    "swahili": {
+      "queries": 475,
+      "doc_hit_rate_at_1": 0.8737,
+      "doc_hit_rate_at_5": 0.9263,
+      "doc_mrr": 0.8948,
+      "answer_recall_at_5": 0.9158
+    },
+    "english": {
+      "queries": 278,
+      "doc_hit_rate_at_1": 0.8705,
+      "doc_hit_rate_at_5": 0.8993,
+      "doc_mrr": 0.8834,
+      "answer_recall_at_5": 0.9101
+    },
+    "korean": {
+      "queries": 194,
+      "doc_hit_rate_at_1": 0.7577,
+      "doc_hit_rate_at_5": 0.8505,
+      "doc_mrr": 0.7952,
+      "answer_recall_at_5": 0.8299
+    },
+    "japanese": {
+      "queries": 139,
+      "doc_hit_rate_at_1": 0.8201,
+      "doc_hit_rate_at_5": 0.8921,
+      "doc_mrr": 0.8537,
+      "answer_recall_at_5": 0.8849
+    },
+    "bengali": {
+      "queries": 111,
+      "doc_hit_rate_at_1": 0.7658,
+      "doc_hit_rate_at_5": 0.9189,
+      "doc_mrr": 0.8342,
+      "answer_recall_at_5": 0.9009
+    },
+    "thai": {
+      "queries": 1,
+      "doc_hit_rate_at_1": 1.0,
+      "doc_hit_rate_at_5": 1.0,
+      "doc_mrr": 1.0,
+      "answer_recall_at_5": 1.0
+    }
+  }
+}

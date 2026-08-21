@@ -95,7 +95,7 @@ Empirical evaluation against the **Google Research TyDi QA** multilingual gold-s
 | | p50 | **21.42 ms** | Zero client-side post-processing |
 | | p95 | **22.09 ms** | Predictable tail latency on PostgreSQL 16 |
 | **Ingestion & Verification** | Throughput | **651.5 docs/sec** | 4,488 documents verified via SHA-256 in **6.89s** (16 workers) |
-| **Tenant Isolation** | Data Leakage | **0 records** | 100% Zero Leakage verified under PostgreSQL RLS (`auth.uid()`) |
+
 
 ---
 

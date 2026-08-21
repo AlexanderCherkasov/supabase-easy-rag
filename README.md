@@ -7,74 +7,7 @@
 [![CI Postgres Live](https://img.shields.io/badge/CI-Postgres%2016%20%2B%20pgvector-success.svg)](.github/workflows/ci.yml)
 [![Cloud Supabase Validated](https://img.shields.io/badge/Cloud%20Supabase-Live%20Verified-brightgreen.svg)](CLOUD_EVAL_REPORT.md)
 
-A production-ready, lightweight Hybrid RAG engine built natively on PostgreSQL & Supabase.
-
----
-
-## 🛡️ Production Trust & Enterprise Quality Guarantees
-
-Supabase Easy RAG is built for high-stakes production workloads with rigorous validation across four pillars:
-
-- ☁️ **Live Cloud Supabase Verified**: Deployed and evaluated with zero data leakage on live Supabase Cloud (PostgreSQL 17.6 in `eu-north-1`). See [CLOUD_EVAL_REPORT.md](CLOUD_EVAL_REPORT.md).
-- 🐘 **Real PostgreSQL 16 + pgvector CI**: Automated GitHub Actions testing against live `pgvector/pgvector:pg16` containers with genuine HNSW index scans, GIN full-text index scans, and database triggers.
-- 🔒 **RLS Adversarial Test Suite**: Exhaustive security verification proving **zero cross-tenant data leakage** across vector, FTS, and hybrid retrieval, with dynamic many-to-many sharing and instant revocation.
-- 🎯 **Filtered ANN Recall Preservation**: pgvector HNSW candidate pool oversampling (`candidate_count`) and iterative scan (`hnsw.iterative_scan = 'relaxed_order'`) ensure **100% Top-1 recall** even under selective metadata and tenant filters.
-- ⚖️ **Ablation-Proven Hybrid RRF**: Benchmarked against Pure Vector and Pure FTS across diverse query archetypes (conceptual, exact technical codes, mixed, multilingual), demonstrating consistent MRR superiority.
-
----
-
-## Why Supabase Easy RAG?
-
-- 🎯 **High-Accuracy Hybrid Search**: Combines semantic vector search with keyword matching — catches both conceptual questions and exact IDs/terms.
-- 📖 **Parent-Context Expansion**: Searches precise 400-token chunks for high retrieval precision (100% Document Top-1, 92%+ Fact Recall), while feeding the full parent section to your LLM.
-- 🔒 **Native Multi-Tenant Security**: Out-of-the-box Row-Level Security (RLS) via Supabase Auth (`auth.uid()`) — users only see documents they own or are shared with them.
-- ⚡ **High-Speed Parallel Ingestion**: Automatic change detection (SHA-256) verifies 650+ docs/sec incrementally, with multi-threaded embedding generation.
-- 🌍 **Battle-Tested Multilingual**: Evaluated across 11 languages with automatic text search dictionary fallbacks (English, Russian, Arabic, Finnish, and more).
-- 🔌 **Zero Framework Overhead**: Clean Python SDK and pure PostgreSQL RPCs. No heavy dependencies.
-
----
-
-## 📊 Live Evaluation Benchmarks
-
-### 1. Cloud Supabase Live Benchmark (PostgreSQL 17.6)
-
-Full empirical evaluation conducted against a live cloud Supabase instance ([CLOUD_EVAL_REPORT.md](CLOUD_EVAL_REPORT.md)):
-
-| Metric | Pure Vector (Dense) | Pure FTS (Sparse BM25) | Hybrid RRF (Combined) | Hybrid Advantage |
-| :--- | :---: | :---: | :---: | :--- |
-| **Top-1 Hit Rate (Hit@1)** | **100.0%** | 57.1% | **100.0%** | **100% precision on rank 1** |
-| **Top-3 Hit Rate (Hit@3)** | **100.0%** | 57.1% | **100.0%** | **100% Top-3 recall** |
-| **Top-5 Hit Rate (Hit@5)** | **100.0%** | 57.1% | **100.0%** | **100% Top-5 recall** |
-| **Mean Reciprocal Rank (MRR)** | **1.0000** | 0.5714 | **1.0000** | **Peak monotonic accuracy** |
-| **Cross-Tenant Data Leakage** | — | — | **0 records** | **100% Zero Leakage verified** |
-
----
-
-### 2. Category-Specific Retrieval Breakdown
-
-| Query Archetype | Pure Vector | Pure FTS | Hybrid RRF | Why Hybrid Wins |
-| :--- | :---: | :---: | :---: | :--- |
-| **Semantic / Paraphrase** | **1.0000** | 0.0000 | **1.0000** | Handles synonyms with zero keyword overlap |
-| **Exact Identifier / Error Code** | 1.0000 | **1.0000** | **1.0000** | Catches unique hash/tokens (e.g. `ERR-7749`) |
-| **Mixed Semantic + Technical** | **1.0000** | 1.0000 | **1.0000** | Fuses domain semantics with exact filter terms |
-| **Security & Multi-Tenancy** | **1.0000** | 0.0000 | **1.0000** | Precision matching for auth & permissions |
-| **Distributed Consensus** | **1.0000** | 1.0000 | **1.0000** | Algorithms & replication topics |
-| **Multilingual (Russian)** | **1.0000** | **1.0000** | **1.0000** | Morphological stemming + vector similarity |
-| **Filtered ANN (pgvector)** | **1.0000** | 0.0000 | **1.0000** | High-recall iterative graph traversal |
-
----
-
-### 3. Google Research TyDi QA Global Benchmark
-
-Evaluated against the complete **Google Research TyDi QA** gold-standard validation corpus (4,488 authentic Wikipedia articles, 5,077 real human questions across 11 typologically diverse languages) with **400-character chunking** and Reciprocal Rank Fusion (RRF):
-
-| Benchmark Metric | Score | Description |
-| :--- | :---: | :--- |
-| **Document Hit Rate @ 1 (Top-1)** | **88.46%** | Ground-truth relevant document is ranked #1 (Strict Document Match) |
-| **Document Hit Rate @ 5 (Top-5)** | **92.34%** | Ground-truth relevant document in Top-5 retrieved chunks |
-| **Document MRR (Mean Reciprocal Rank)** | **0.9012** | Average reciprocal rank on ground-truth document retrieval |
-| **Answer Span Recall @ 5** | **91.90%** | Exact fact-answer span is contained in the top-5 retrieved chunks |
-| **Incremental Verification Speed** | **651.5 docs/sec** | 4,488 documents verified via SHA-256 in **6.9 seconds** (16 parallel workers) |
+A production-ready, ultra-fast Hybrid RAG engine built natively on PostgreSQL & Supabase. Combines dense vector search (HNSW) and sparse BM25 full-text search with Reciprocal Rank Fusion (RRF), parent-context expansion, and database-native multi-tenant RLS isolation.
 
 ---
 
@@ -89,21 +22,17 @@ pip install supabase-easy-rag
 ### 2. Apply Database Migrations
 
 #### Option A: Via Supabase CLI (Recommended)
-
 ```bash
-# Push migrations to your linked Supabase project:
 supabase db push
 ```
 
-#### Option B: Via SQL Editor or CLI export
-
+#### Option B: Via SQL Editor or CLI Export
 ```bash
-# Export migration files:
 easy-rag init-sql --output ./migrations --dimensions 1536
 ```
-Apply `01_schema.sql` and `02_functions.sql` to your Supabase project via the Supabase Dashboard SQL Editor.
+Apply `01_schema.sql` and `02_functions.sql` in the Supabase SQL Editor.
 
-### 3. Configure Environment Variables
+### 3. Configure Environment Variables (`.env`)
 
 ```env
 SUPABASE_URL="https://your-project.supabase.co"
@@ -112,11 +41,89 @@ SUPABASE_ANON_KEY="your-anon-key"
 
 # Embedding Provider (OpenAI or Azure OpenAI)
 OPENAI_API_KEY="sk-..."
-# or Azure:
-AZURE_OPENAI_API_KEY="your-azure-key"
-AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com"
-AZURE_OPENAI_EMBEDDING_DEPLOYMENT="text-embedding-3-large"
 ```
+
+### 4. 30-Second Python Example
+
+```python
+from supabase_easy_rag import EasyRagClient
+
+# Pass the end-user JWT for automatic RLS tenant isolation
+client = EasyRagClient(user_jwt="eyJhbGci...")
+
+# 1. Sync markdown knowledge base in parallel (SHA-256 incremental)
+client.sync_directory("./docs", max_workers=8)
+
+# 2. Search with Hybrid RRF & Parent-Context Expansion
+results = client.search_hybrid(
+    query="PostgreSQL connection pooling guidelines",
+    match_count=5,
+    candidate_count=50,
+    rrf_k=60,
+    expand_context="section",  # "section" or "document"
+)
+
+for item in results:
+    print(f"[{item.final_score:.4f}] {item.document_title} > {item.section_title}")
+    print(item.effective_text[:200] + "...\n")
+```
+
+---
+
+## 📊 Evaluation & Latency Benchmarks
+
+Empirical evaluation against the **Google Research TyDi QA** multilingual gold-standard benchmark (5,077 natural queries, 4,488 authentic Wikipedia articles across 11 typologically diverse languages) and direct execution on PostgreSQL 16 + pgvector:
+
+### 1. Retrieval Accuracy & Quality (TyDi QA Global Benchmark)
+
+| Benchmark Metric | Score | Description |
+| :--- | :---: | :--- |
+| **Document Hit Rate @ 1 (Top-1)** | **88.46%** | Ground-truth document ranked #1 (Strict Document Match) |
+| **Document Hit Rate @ 3 (Top-3)** | **91.61%** | Ground-truth document in Top-3 chunks |
+| **Document Hit Rate @ 5 (Top-5)** | **92.34%** | Ground-truth document in Top-5 chunks |
+| **Document Hit Rate @ 10 (Top-10)** | **92.75%** | Ground-truth document in Top-10 chunks |
+| **Document MRR (Mean Reciprocal Rank)** | **0.9012** | Average reciprocal rank on document retrieval |
+| **Answer Span Recall @ 5** | **91.90%** | Exact fact-answer span contained in Top-5 chunks |
+
+---
+
+### 2. Execution Latency & Ingestion Throughput
+
+| Component | Metric | Value | Details |
+| :--- | :--- | :---: | :--- |
+| **Hybrid SQL Query Latency** | Mean | **21.34 ms** | Single round-trip SQL (pgvector HNSW + FTS GIN + RRF fusion) |
+| | p50 | **21.42 ms** | Zero client-side post-processing |
+| | p95 | **22.09 ms** | Predictable tail latency on PostgreSQL 16 |
+| **Ingestion & Verification** | Throughput | **651.5 docs/sec** | 4,488 documents verified via SHA-256 in **6.89s** (16 workers) |
+| **Tenant Isolation** | Data Leakage | **0 records** | 100% Zero Leakage verified under PostgreSQL RLS (`auth.uid()`) |
+
+---
+
+### 3. Multilingual Breakdown Across 11 Languages
+
+| Language | Queries | Doc Hit @ 1 | Doc Hit @ 5 | Doc MRR | Answer Recall @ 5 |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Russian** | 828 | **91.5%** | **93.8%** | **0.926** | **93.2%** |
+| **Finnish** | 920 | **90.0%** | **93.0%** | **0.913** | **92.9%** |
+| **Arabic** | 964 | **89.2%** | **92.8%** | **0.908** | **92.0%** |
+| **Telugu** | 668 | **89.1%** | **92.8%** | **0.906** | **93.1%** |
+| **Indonesian** | 499 | **89.4%** | **91.8%** | **0.903** | **91.6%** |
+| **Swahili** | 475 | **87.4%** | **92.6%** | **0.895** | **91.6%** |
+| **English** | 278 | **87.1%** | **89.9%** | **0.883** | **91.0%** |
+| **Japanese** | 139 | **82.0%** | **89.2%** | **0.854** | **88.5%** |
+| **Bengali** | 111 | **76.6%** | **91.9%** | **0.834** | **90.1%** |
+| **Korean** | 194 | **75.8%** | **85.0%** | **0.795** | **83.0%** |
+
+---
+
+## ⚙️ Engineering & Security Highlights
+
+- ☁️ **Live Cloud Supabase Tested**: Validated against live Supabase Cloud (PostgreSQL 17.6 in `eu-north-1`). See [CLOUD_EVAL_REPORT.md](CLOUD_EVAL_REPORT.md).
+- 🐘 **PostgreSQL 16 + pgvector CI**: GitHub Actions integration tests against live `pgvector/pgvector:pg16` containers with real HNSW index scans, GIN full-text index scans, and database triggers.
+- 🔒 **Strict RLS Tenant Isolation**: Zero cross-tenant data leakage across vector, FTS, and hybrid retrieval with PostgreSQL `auth.uid()`.
+- 🎯 **Filtered ANN Recall Preservation**: Candidate oversampling (`candidate_count`) and iterative scan (`hnsw.iterative_scan = 'relaxed_order'`) prevent candidate starvation under metadata/tenant filters.
+- 📖 **Parent-Context Expansion**: Searches granular 400-token chunks for precision, returns full parent sections for LLM context.
+- 🌍 **Multilingual FTS & Fallbacks**: Native dictionary stemming and fallback support across 11 languages (English, Russian, Arabic, Finnish, and more).
 
 ---
 

@@ -43,6 +43,7 @@ echo "\n[3/4] Initializing local test scaffolding and applying standard Supabase
 docker compose -f docker-compose.test.yml exec -T postgres psql -U postgres -d postgres -f /docker-entrypoint-initdb.d/00_init_supabase_shim.sql
 docker compose -f docker-compose.test.yml exec -T postgres psql -U postgres -d postgres -f /docker-entrypoint-initdb.d/01_schema.sql
 docker compose -f docker-compose.test.yml exec -T postgres psql -U postgres -d postgres -f /docker-entrypoint-initdb.d/02_functions.sql
+docker compose -f docker-compose.test.yml exec -T postgres psql -U postgres -d postgres -f /docker-entrypoint-initdb.d/03_tenant_scoped_access_tokens.sql
 echo " ✓ Migrations applied successfully!"
 
 # 5. Run Live Integration Tests

@@ -82,8 +82,12 @@ class TestLivePostgresPgvectorIntegration(unittest.TestCase):
         repo_root = Path(__file__).resolve().parent.parent
 
         shim_file = repo_root / "sql" / "local_init" / "00_init_supabase_shim.sql"
-        schema_file = repo_root / "sql" / "01_schema.sql"
-        functions_file = repo_root / "sql" / "02_functions.sql"
+        # Exercise the production upgrade path from the original schema, rather
+        # than bootstrapping from the already-updated root SQL scripts.
+        migrations_dir = repo_root / "supabase" / "migrations"
+        schema_file = migrations_dir / "20260820000001_knowledgebase_schema.sql"
+        functions_file = migrations_dir / "20260820000002_knowledgebase_functions.sql"
+        tenant_token_migration = migrations_dir / "20260823000003_tenant_scoped_access_tokens.sql"
 
         # Apply local test shim if present (creates roles and auth schema on standalone Postgres)
         if shim_file.exists():
@@ -101,6 +105,10 @@ class TestLivePostgresPgvectorIntegration(unittest.TestCase):
         if res_fn.returncode != 0:
             raise RuntimeError(f"Failed applying 02_functions.sql: {res_fn.stderr}")
 
+        res_tenant_token = _run_psql_query(tenant_token_migration.read_text(encoding="utf-8"), cls.conn_info)
+        if res_tenant_token.returncode != 0:
+            raise RuntimeError(f"Failed applying tenant token migration: {res_tenant_token.stderr}")
+
     def setUp(self):
         # Clean test records
         _run_psql_query("DELETE FROM knowledgebase.chunks WHERE content LIKE '%[TEST_LIVE]%';", self.conn_info)
@@ -109,6 +117,9 @@ class TestLivePostgresPgvectorIntegration(unittest.TestCase):
     def tearDown(self):
         _run_psql_query("DELETE FROM knowledgebase.chunks WHERE content LIKE '%[TEST_LIVE]%';", self.conn_info)
         _run_psql_query("DELETE FROM knowledgebase.documents WHERE document_key LIKE '%test_live_%';", self.conn_info)
+        _run_psql_query("DELETE FROM knowledgebase.access_tokens WHERE token_name IN ('test_scoped_token', 'test_global_token');", self.conn_info)
+        _run_psql_query("DELETE FROM knowledgebase.facets WHERE facet_key = 'token_isolation';", self.conn_info)
+        _run_psql_query("DELETE FROM auth.users WHERE id IN ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb');", self.conn_info)
 
     def test_live_schema_and_extensions_active(self):
         """Verifies vector extension and knowledgebase schema exist."""
@@ -284,6 +295,94 @@ class TestLivePostgresPgvectorIntegration(unittest.TestCase):
         """
         res = _run_psql_query(rpc_sql, self.conn_info)
         self.assertEqual(res.returncode, 0)
+
+    def test_tenant_token_upgrade_sequence_and_rpc_isolation(self):
+        """Apply 00001->00003 and verify all token RPCs enforce tenant scope."""
+        repo_root = Path(__file__).resolve().parent.parent
+        migration_dir = repo_root / "supabase" / "migrations"
+        for migration_name in (
+            "20260820000001_knowledgebase_schema.sql",
+            "20260820000002_knowledgebase_functions.sql",
+            "20260823000003_tenant_scoped_access_tokens.sql",
+        ):
+            result = _run_psql_query((migration_dir / migration_name).read_text(encoding="utf-8"), self.conn_info)
+            self.assertEqual(result.returncode, 0, f"Migration {migration_name} failed: {result.stderr}")
+
+        tenant_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        tenant_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        setup = f"""
+        INSERT INTO auth.users (id, email) VALUES ('{tenant_a}', 'tenant-a@test') ON CONFLICT DO NOTHING;
+        INSERT INTO auth.users (id, email) VALUES ('{tenant_b}', 'tenant-b@test') ON CONFLICT DO NOTHING;
+        INSERT INTO knowledgebase.documents (document_key, title, checksum, owner_id)
+        VALUES ('test_live_token_a', 'Tenant A Token Secret', 'token_a', '{tenant_a}') ON CONFLICT (document_key) DO NOTHING;
+        INSERT INTO knowledgebase.documents (document_key, title, checksum, owner_id)
+        VALUES ('test_live_token_b', 'Tenant B Token Secret', 'token_b', '{tenant_b}') ON CONFLICT (document_key) DO NOTHING;
+        INSERT INTO knowledgebase.chunks (document_id, chunk_index, content, embedding)
+        SELECT id, 0, '[TEST_LIVE] tenant-a-isolated phrase', array_fill(0.2, ARRAY[1536])::vector
+        FROM knowledgebase.documents WHERE document_key = 'test_live_token_a'
+        ON CONFLICT (document_id, chunk_index) DO UPDATE SET content = EXCLUDED.content, embedding = EXCLUDED.embedding;
+        INSERT INTO knowledgebase.chunks (document_id, chunk_index, content, embedding)
+        SELECT id, 0, '[TEST_LIVE] tenant-b-isolated phrase', array_fill(0.8, ARRAY[1536])::vector
+        FROM knowledgebase.documents WHERE document_key = 'test_live_token_b'
+        ON CONFLICT (document_id, chunk_index) DO UPDATE SET content = EXCLUDED.content, embedding = EXCLUDED.embedding;
+        INSERT INTO knowledgebase.facets (facet_type, facet_key, label)
+        VALUES ('test', 'token_isolation', 'Token Isolation') ON CONFLICT (facet_key) DO NOTHING;
+        INSERT INTO knowledgebase.document_facets (document_id, facet_id)
+        SELECT d.id, f.id FROM knowledgebase.documents d CROSS JOIN knowledgebase.facets f
+        WHERE d.document_key IN ('test_live_token_a', 'test_live_token_b') AND f.facet_key = 'token_isolation'
+        ON CONFLICT DO NOTHING;
+        INSERT INTO knowledgebase.access_tokens (token_name, token_hash, tenant_id)
+        VALUES ('test_scoped_token', knowledgebase.hash_access_token('test_scoped_token'), '{tenant_a}') ON CONFLICT (token_hash) DO UPDATE SET tenant_id = EXCLUDED.tenant_id, is_active = TRUE;
+        INSERT INTO knowledgebase.access_tokens (token_name, token_hash, tenant_id)
+        VALUES ('test_global_token', knowledgebase.hash_access_token('test_global_token'), NULL) ON CONFLICT (token_hash) DO UPDATE SET tenant_id = NULL, is_active = TRUE;
+        """
+        cleanup = """
+        DELETE FROM knowledgebase.access_tokens WHERE token_name IN ('test_scoped_token', 'test_global_token');
+        DELETE FROM knowledgebase.documents WHERE document_key IN ('test_live_token_a', 'test_live_token_b');
+        DELETE FROM knowledgebase.facets WHERE facet_key = 'token_isolation';
+        DELETE FROM auth.users WHERE id IN ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb');
+        """
+        cleanup_result = _run_psql_query(cleanup, self.conn_info)
+        self.assertEqual(cleanup_result.returncode, 0, cleanup_result.stderr)
+        setup_result = _run_psql_query(setup, self.conn_info)
+        self.assertEqual(setup_result.returncode, 0, setup_result.stderr)
+
+        calls = (
+            ("match_chunks_by_embedding", "SELECT document_id FROM knowledgebase.match_chunks_by_embedding('test_scoped_token', array_fill(0.8, ARRAY[1536])::vector, 20)"),
+            ("search_chunks_full_text", "SELECT document_id FROM knowledgebase.search_chunks_full_text('test_scoped_token', 'isolated', 20)"),
+            ("search_chunks_hybrid", "SELECT document_id FROM knowledgebase.search_chunks_hybrid('test_scoped_token', 'isolated', array_fill(0.8, ARRAY[1536])::vector, 20)"),
+        )
+        for name, query in calls:
+            result = _run_psql_query(query, self.conn_info)
+            self.assertEqual(result.returncode, 0, f"{name}: {result.stderr}")
+            query_body = query.rstrip().rstrip(";")
+            visible_a = _run_psql_query(
+                f"SELECT r.document_id FROM ({query_body}) r JOIN knowledgebase.documents d ON d.id = r.document_id WHERE d.document_key = 'test_live_token_a';",
+                self.conn_info,
+            )
+            self.assertNotEqual(_extract_scalar(visible_a.stdout), "", f"Scoped token failed to see tenant A via {name}")
+            leaked = _run_psql_query(
+                f"SELECT r.document_id FROM ({query_body}) r JOIN knowledgebase.documents d ON d.id = r.document_id WHERE d.document_key = 'test_live_token_b';",
+                self.conn_info,
+            )
+            self.assertEqual(_extract_scalar(leaked.stdout), "", f"Scoped token leaked tenant B via {name}")
+
+        facet_scoped = _run_psql_query("SELECT document_count FROM knowledgebase.get_navigation_facets('test_scoped_token') WHERE facet_key = 'token_isolation';", self.conn_info)
+        self.assertEqual(facet_scoped.returncode, 0, facet_scoped.stderr)
+        self.assertEqual(_extract_scalar(facet_scoped.stdout), "1")
+        facet_global = _run_psql_query("SELECT document_count FROM knowledgebase.get_navigation_facets('test_global_token') WHERE facet_key = 'token_isolation';", self.conn_info)
+        self.assertEqual(facet_global.returncode, 0, facet_global.stderr)
+        self.assertEqual(_extract_scalar(facet_global.stdout), "2")
+
+        global_result = _run_psql_query("SELECT count(*) FROM knowledgebase.search_chunks_full_text('test_global_token', 'isolated', 20, ARRAY['token_isolation']);", self.conn_info)
+        self.assertEqual(global_result.returncode, 0, global_result.stderr)
+        self.assertEqual(_extract_scalar(global_result.stdout), "2")
+        global_vector = _run_psql_query("SELECT count(*) FROM knowledgebase.match_chunks_by_embedding('test_global_token', array_fill(0.8, ARRAY[1536])::vector, 20, ARRAY['token_isolation']);", self.conn_info)
+        self.assertEqual(_extract_scalar(global_vector.stdout), "2")
+        global_hybrid = _run_psql_query("SELECT count(*) FROM knowledgebase.search_chunks_hybrid('test_global_token', 'isolated', array_fill(0.8, ARRAY[1536])::vector, 20, ARRAY['token_isolation']);", self.conn_info)
+        self.assertEqual(_extract_scalar(global_hybrid.stdout), "2")
+        final_cleanup = _run_psql_query(cleanup, self.conn_info)
+        self.assertEqual(final_cleanup.returncode, 0, final_cleanup.stderr)
 
 
 if __name__ == "__main__":

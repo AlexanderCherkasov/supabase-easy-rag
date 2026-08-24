@@ -1,5 +1,6 @@
 import unittest
 import uuid
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from supabase_easy_rag.config import EasyRagConfig, ProviderConfig
@@ -9,6 +10,20 @@ from supabase_easy_rag.security.tokens import TokenManager, generate_secure_toke
 
 
 class TestSecurity(unittest.TestCase):
+    def test_tenant_upgrade_migration_is_explicit_and_ordered(self):
+        migration = Path(__file__).parents[1] / "supabase" / "migrations" / "20260823000003_tenant_scoped_access_tokens.sql"
+        sql = migration.read_text(encoding="utf-8")
+        self.assertNotIn("pg_get_functiondef", sql)
+        for function_name in (
+            "match_chunks_by_embedding",
+            "search_chunks_full_text",
+            "search_chunks_hybrid",
+            "get_navigation_facets",
+        ):
+            self.assertIn(f"CREATE OR REPLACE FUNCTION knowledgebase.{function_name}", sql)
+        self.assertIn("SET search_path = pg_catalog, public, extensions, knowledgebase", sql)
+        self.assertIn("ADD COLUMN IF NOT EXISTS tenant_id", sql)
+
     def test_token_generation_and_hashing(self):
         token = generate_secure_token(prefix="test_")
         self.assertTrue(token.startswith("test_"))
@@ -54,6 +69,29 @@ class TestSecurity(unittest.TestCase):
         self.assertTrue(res)
         mock_table.update.assert_called_once_with({"is_active": False})
         mock_update.eq.assert_called_once_with("token_name", injection_attempt)
+
+    def test_create_token_global_and_tenant_scoped_payloads(self):
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.schema.return_value.table.return_value = mock_table
+        mock_table.insert.return_value.execute.return_value.data = [{"tenant_id": None}]
+        manager = TokenManager(postgrest_client=mock_client)
+
+        manager.create_token("global")
+        global_payload = mock_table.insert.call_args.args[0]
+        self.assertIsNone(global_payload["tenant_id"])
+
+        tenant_id = str(uuid.uuid4())
+        manager.create_token("scoped", tenant_id=tenant_id)
+        scoped_payload = mock_table.insert.call_args.args[0]
+        self.assertEqual(scoped_payload["tenant_id"], tenant_id)
+
+    def test_create_token_rejects_invalid_tenant_uuid(self):
+        manager = TokenManager(postgrest_client=MagicMock())
+        with self.assertRaises(ValueError):
+            manager.create_token("scoped", tenant_id="not-a-uuid")
+        with self.assertRaises(ValueError):
+            manager.create_token("scoped", tenant_id="  ")
 
     def test_client_rls_requires_anon_key(self):
         dummy_provider = ProviderConfig(provider="openai_like", model="test", endpoint="http://localhost", api_key="sk-test")

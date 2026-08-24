@@ -1,3 +1,10 @@
+-- Upgrade existing installations with tenant-scoped access tokens.
+ALTER TABLE knowledgebase.access_tokens
+    ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES auth.users(id) ON DELETE CASCADE;
+
+-- The complete function definitions below intentionally mirror sql/02_functions.sql
+-- so tenant predicates run before candidate LIMITs and migration-only upgrades are safe.
+
 -- ============================================================================
 -- Supabase Easy RAG: PostgreSQL RPC Functions
 -- Security Token Audit + Vector, Full-Text, and Hybrid Search RPCs
@@ -16,11 +23,12 @@ AS $$
 $$;
 
 -- Security Assertion Function: Validates Token & Audit Trail
+-- If p_kb_token is null/empty but auth.uid() exists -> RLS mode, no token check.
 CREATE OR REPLACE FUNCTION knowledgebase.assert_retrieval_access(p_kb_token TEXT)
 RETURNS UUID
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_access_token_id UUID;
@@ -28,8 +36,10 @@ DECLARE
 BEGIN
     v_role := COALESCE(current_setting('request.jwt.claim.role', true), 'service_role');
 
+    -- RLS mode: no token, but authenticated user via JWT -> skip token check
+    -- Caller relies on RLS policies (documents.owner_id = auth.uid())
     IF (p_kb_token IS NULL OR btrim(p_kb_token) = '') AND auth.uid() IS NOT NULL THEN
-        RETURN NULL;
+        RETURN NULL; -- signal RLS path
     END IF;
 
     IF p_kb_token IS NULL OR btrim(p_kb_token) = '' THEN
@@ -86,7 +96,7 @@ BEGIN
 END;
 $$;
 
--- Helper: check if request is RLS-authenticated
+-- Helper: check if request is RLS-authenticated (auth.uid() exists) vs token
 CREATE OR REPLACE FUNCTION knowledgebase.is_rls_authenticated()
 RETURNS BOOLEAN
 LANGUAGE sql
@@ -95,7 +105,11 @@ AS $$
     SELECT auth.uid() IS NOT NULL;
 $$;
 
--- 1. Vector Search RPC
+-- ============================================================================
+-- 1. Vector Search RPC — supports token OR RLS
+-- =========================================================================-- ============================================================================
+-- 1. Vector Search RPC — supports token OR RLS
+-- ============================================================================
 CREATE OR REPLACE FUNCTION knowledgebase.match_chunks_by_embedding(
     p_kb_token TEXT,
     p_query_embedding VECTOR,
@@ -120,19 +134,24 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_token_id UUID;
+    v_tenant_id UUID;
     v_is_rls BOOLEAN;
 BEGIN
     v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
     v_is_rls := (v_token_id IS NULL AND knowledgebase.is_rls_authenticated());
+    IF v_token_id IS NOT NULL THEN
+        SELECT tenant_id INTO v_tenant_id FROM knowledgebase.access_tokens WHERE id = v_token_id;
+    END IF;
 
     IF p_query_embedding IS NULL THEN
         RAISE EXCEPTION 'Query embedding is required';
     END IF;
 
+    -- Enable pgvector 0.7.0+ iterative index scan for filtered ANN
     BEGIN
         PERFORM set_config('hnsw.iterative_scan', 'relaxed_order', true);
         PERFORM set_config('hnsw.ef_search', GREATEST(COALESCE(p_ef_search, COALESCE(p_match_count, 5) * 10), 40)::text, true);
@@ -158,13 +177,12 @@ BEGIN
         WHERE c.embedding IS NOT NULL
           AND (p_min_vector_similarity IS NULL OR (1 - (c.embedding <=> p_query_embedding)) >= p_min_vector_similarity)
           AND (
-            NOT v_is_rls
-            OR d.owner_id IS NULL
-            OR d.owner_id = auth.uid()
-            OR EXISTS (
+            (NOT v_is_rls AND v_tenant_id IS NULL)
+            OR (NOT v_is_rls AND v_tenant_id IS NOT NULL AND d.owner_id = v_tenant_id)
+            OR (v_is_rls AND (d.owner_id IS NULL OR d.owner_id = auth.uid() OR EXISTS (
                 SELECT 1 FROM knowledgebase.document_owners do2
                 WHERE do2.document_id = d.id AND do2.owner_id = auth.uid()
-            )
+            )))
           )
           AND (
             p_facet_keys IS NULL
@@ -197,6 +215,7 @@ BEGIN
 END;
 $$;
 
+-- RLS-only variant (SECURITY INVOKER — respects RLS natively, no token needed)
 CREATE OR REPLACE FUNCTION knowledgebase.match_chunks_by_embedding_rls(
     p_query_embedding VECTOR,
     p_match_count INT DEFAULT 5,
@@ -220,13 +239,14 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 BEGIN
     IF p_query_embedding IS NULL THEN
         RAISE EXCEPTION 'Query embedding is required';
     END IF;
 
+    -- Enable pgvector 0.7.0+ iterative index scan for filtered ANN
     BEGIN
         PERFORM set_config('hnsw.iterative_scan', 'relaxed_order', true);
         PERFORM set_config('hnsw.ef_search', GREATEST(COALESCE(p_ef_search, COALESCE(p_match_count, 5) * 10), 40)::text, true);
@@ -266,7 +286,9 @@ BEGIN
 END;
 $$;
 
--- 2. Full-Text Search (FTS) RPC
+-- ============================================================================
+-- 2. Full-Text Search (FTS) RPC — supports token OR RLS
+-- ============================================================================
 CREATE OR REPLACE FUNCTION knowledgebase.search_chunks_full_text(
     p_kb_token TEXT,
     p_query TEXT,
@@ -290,16 +312,20 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_tsquery tsquery;
     v_token_id UUID;
+    v_tenant_id UUID;
     v_is_rls BOOLEAN;
     v_regconfig regconfig;
 BEGIN
     v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
     v_is_rls := (v_token_id IS NULL AND knowledgebase.is_rls_authenticated());
+    IF v_token_id IS NOT NULL THEN
+        SELECT tenant_id INTO v_tenant_id FROM knowledgebase.access_tokens WHERE id = v_token_id;
+    END IF;
 
     IF p_query IS NULL OR btrim(p_query) = '' THEN
         RAISE EXCEPTION 'Full-text query is required';
@@ -311,14 +337,17 @@ BEGIN
         v_regconfig := 'simple'::regconfig;
     END;
 
+    -- Adaptive tsquery: try websearch_to_tsquery first; if no match or empty, use plainto_tsquery
     v_tsquery := websearch_to_tsquery(v_regconfig, p_query);
     IF v_tsquery IS NULL OR length(v_tsquery::text) = 0 THEN
         v_tsquery := plainto_tsquery(v_regconfig, p_query);
     END IF;
 
+    -- If still empty or query contains terms, fallback to simple regconfig or OR-connected query
     IF v_tsquery IS NULL OR length(v_tsquery::text) = 0 THEN
         v_tsquery := plainto_tsquery('simple'::regconfig, p_query);
     END IF;
+
 
     RETURN QUERY
     WITH candidates AS (
@@ -337,13 +366,12 @@ BEGIN
         LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
         WHERE c.search_vector @@ v_tsquery
           AND (
-            NOT v_is_rls
-            OR d.owner_id IS NULL
-            OR d.owner_id = auth.uid()
-            OR EXISTS (
+            (NOT v_is_rls AND v_tenant_id IS NULL)
+            OR (NOT v_is_rls AND v_tenant_id IS NOT NULL AND d.owner_id = v_tenant_id)
+            OR (v_is_rls AND (d.owner_id IS NULL OR d.owner_id = auth.uid() OR EXISTS (
                 SELECT 1 FROM knowledgebase.document_owners do2
                 WHERE do2.document_id = d.id AND do2.owner_id = auth.uid()
-            )
+            )))
           )
           AND (
             p_facet_keys IS NULL
@@ -398,7 +426,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_tsquery tsquery;
@@ -414,14 +442,17 @@ BEGIN
         v_regconfig := 'simple'::regconfig;
     END;
 
+    -- Adaptive tsquery: try websearch_to_tsquery first; if no match or empty, use plainto_tsquery
     v_tsquery := websearch_to_tsquery(v_regconfig, p_query);
     IF v_tsquery IS NULL OR length(v_tsquery::text) = 0 THEN
         v_tsquery := plainto_tsquery(v_regconfig, p_query);
     END IF;
 
+    -- If still empty, fallback to simple regconfig
     IF v_tsquery IS NULL OR length(v_tsquery::text) = 0 THEN
         v_tsquery := plainto_tsquery('simple'::regconfig, p_query);
     END IF;
+
 
     RETURN QUERY
     WITH candidates AS (
@@ -443,6 +474,7 @@ BEGIN
             )
           )
         ORDER BY ts_rank_cd(c.search_vector, v_tsquery) DESC, d.title ASC
+
         LIMIT GREATEST(COALESCE(p_match_count, 5), 1)
     )
     SELECT
@@ -454,7 +486,9 @@ BEGIN
 END;
 $$;
 
--- 3. Hybrid Search RPC
+-- ============================================================================
+-- 3. Hybrid Search RPC (Two-Stage Vector + FTS Candidates with RRF Fusion)
+-- ============================================================================
 CREATE OR REPLACE FUNCTION knowledgebase.search_chunks_hybrid(
     p_kb_token TEXT,
     p_query TEXT,
@@ -485,11 +519,12 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_tsquery tsquery;
     v_token_id UUID;
+    v_tenant_id UUID;
     v_is_rls BOOLEAN;
     v_candidate_count INT;
     v_rrf_k INT;
@@ -499,11 +534,15 @@ DECLARE
 BEGIN
     v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
     v_is_rls := (v_token_id IS NULL AND knowledgebase.is_rls_authenticated());
+    IF v_token_id IS NOT NULL THEN
+        SELECT tenant_id INTO v_tenant_id FROM knowledgebase.access_tokens WHERE id = v_token_id;
+    END IF;
 
     IF p_query_embedding IS NULL AND (p_query IS NULL OR btrim(p_query) = '') THEN
         RAISE EXCEPTION 'Query text or query embedding is required';
     END IF;
 
+    -- Candidate pool oversampling with configurable upper bound
     v_candidate_count := LEAST(COALESCE(p_candidate_count, GREATEST(COALESCE(p_match_count, 5) * 10, 50)), 500);
     v_rrf_k := GREATEST(COALESCE(p_rrf_k, 60), 1);
     v_vector_weight := GREATEST(COALESCE(p_vector_weight, 1.0), 0.0);
@@ -514,6 +553,7 @@ BEGIN
         v_regconfig := 'simple'::regconfig;
     END;
 
+    -- Enable pgvector 0.7.0+ iterative index scan for filtered ANN
     BEGIN
         PERFORM set_config('hnsw.iterative_scan', 'relaxed_order', true);
         PERFORM set_config('hnsw.ef_search', GREATEST(COALESCE(p_ef_search, v_candidate_count * 2), 40)::text, true);
@@ -531,6 +571,7 @@ BEGIN
         END IF;
     END IF;
 
+
     RETURN QUERY
     WITH vector_candidates AS (
         SELECT
@@ -543,13 +584,12 @@ BEGIN
           AND c.embedding IS NOT NULL
           AND (p_min_vector_similarity IS NULL OR (1 - (c.embedding <=> p_query_embedding)) >= p_min_vector_similarity)
           AND (
-            NOT v_is_rls
-            OR d.owner_id IS NULL
-            OR d.owner_id = auth.uid()
-            OR EXISTS (
+            (NOT v_is_rls AND v_tenant_id IS NULL)
+            OR (NOT v_is_rls AND v_tenant_id IS NOT NULL AND d.owner_id = v_tenant_id)
+            OR (v_is_rls AND (d.owner_id IS NULL OR d.owner_id = auth.uid() OR EXISTS (
                 SELECT 1 FROM knowledgebase.document_owners do2
                 WHERE do2.document_id = d.id AND do2.owner_id = auth.uid()
-            )
+            )))
           )
           AND (
             p_facet_keys IS NULL
@@ -574,13 +614,12 @@ BEGIN
         WHERE v_tsquery IS NOT NULL
           AND c.search_vector @@ v_tsquery
           AND (
-            NOT v_is_rls
-            OR d.owner_id IS NULL
-            OR d.owner_id = auth.uid()
-            OR EXISTS (
+            (NOT v_is_rls AND v_tenant_id IS NULL)
+            OR (NOT v_is_rls AND v_tenant_id IS NOT NULL AND d.owner_id = v_tenant_id)
+            OR (v_is_rls AND (d.owner_id IS NULL OR d.owner_id = auth.uid() OR EXISTS (
                 SELECT 1 FROM knowledgebase.document_owners do2
                 WHERE do2.document_id = d.id AND do2.owner_id = auth.uid()
-            )
+            )))
           )
           AND (
             p_facet_keys IS NULL
@@ -595,6 +634,8 @@ BEGIN
         ORDER BY ts_rank_cd(c.search_vector, v_tsquery) DESC
         LIMIT v_candidate_count
     ),
+
+
     fused AS (
         SELECT
             COALESCE(vc.chunk_id, fc.chunk_id) AS chunk_id,
@@ -661,7 +702,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_tsquery tsquery;
@@ -685,6 +726,7 @@ BEGIN
         v_regconfig := 'simple'::regconfig;
     END;
 
+    -- Enable pgvector 0.7.0+ iterative index scan for filtered ANN
     BEGIN
         PERFORM set_config('hnsw.iterative_scan', 'relaxed_order', true);
         PERFORM set_config('hnsw.ef_search', GREATEST(COALESCE(p_ef_search, v_candidate_count * 2), 40)::text, true);
@@ -701,6 +743,7 @@ BEGIN
             v_tsquery := plainto_tsquery('simple'::regconfig, p_query);
         END IF;
     END IF;
+
 
     RETURN QUERY
     WITH vector_candidates AS (
@@ -744,6 +787,8 @@ BEGIN
         ORDER BY ts_rank_cd(c.search_vector, v_tsquery) DESC
         LIMIT v_candidate_count
     ),
+
+
     fused AS (
         SELECT
             COALESCE(vc.chunk_id, fc.chunk_id) AS chunk_id,
@@ -781,7 +826,9 @@ BEGIN
 END;
 $$;
 
--- 4. Navigation Facets RPC
+-- ============================================================================
+-- 4. Navigation Facets RPC — token OR RLS
+-- ============================================================================
 CREATE OR REPLACE FUNCTION knowledgebase.get_navigation_facets(
     p_kb_token TEXT,
     p_facet_type TEXT DEFAULT NULL
@@ -797,12 +844,16 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_token_id UUID;
+    v_tenant_id UUID;
 BEGIN
     v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
+    IF v_token_id IS NOT NULL THEN
+        SELECT tenant_id INTO v_tenant_id FROM knowledgebase.access_tokens WHERE id = v_token_id;
+    END IF;
     RETURN QUERY
     SELECT
         f.id,
@@ -814,7 +865,9 @@ BEGIN
         COUNT(df.document_id) AS document_count
     FROM knowledgebase.facets f
     LEFT JOIN knowledgebase.document_facets df ON df.facet_id = f.id
-    WHERE p_facet_type IS NULL OR f.facet_type = p_facet_type
+    LEFT JOIN knowledgebase.documents d ON d.id = df.document_id
+    WHERE (p_facet_type IS NULL OR f.facet_type = p_facet_type)
+      AND (v_tenant_id IS NULL OR d.owner_id = v_tenant_id)
     GROUP BY f.id, f.facet_type, f.facet_key, f.label, f.parent_facet_id, f.sort_order
     ORDER BY f.facet_type ASC, f.sort_order ASC, f.label ASC;
 END;
@@ -834,7 +887,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 BEGIN
     RETURN QUERY

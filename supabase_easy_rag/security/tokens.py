@@ -33,7 +33,16 @@ class TokenManager:
         name: str,
         expires_at: str | None = None,
         metadata: dict[str, Any] | None = None,
+        tenant_id: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
+        if tenant_id is not None:
+            if not str(tenant_id).strip():
+                raise ValueError("tenant_id must be a non-empty UUID")
+            try:
+                tenant_id = str(uuid.UUID(str(tenant_id).strip()))
+            except ValueError as exc:
+                raise ValueError("tenant_id must be a valid UUID") from exc
+
         raw_token = generate_secure_token()
         token_hash = hash_token(raw_token)
 
@@ -43,6 +52,7 @@ class TokenManager:
             "is_active": True,
             "expires_at": expires_at,
             "metadata": metadata or {},
+            "tenant_id": tenant_id,
         }
         response = self._table().insert(payload).execute()
         row = (response.data or [{}])[0]
@@ -60,5 +70,5 @@ class TokenManager:
         return bool(response.data)
 
     def list_tokens(self) -> list[dict[str, Any]]:
-        response = self._table().select("id,token_name,is_active,expires_at,last_used_at,created_at").execute()
+        response = self._table().select("id,token_name,tenant_id,is_active,expires_at,last_used_at,created_at").execute()
         return response.data or []

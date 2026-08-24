@@ -44,8 +44,9 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h localhost -p 5432 -U postgres -d postgres -f sql/local_init/00_init_supabase_shim.sql
-          psql -h localhost -p 5432 -U postgres -d postgres -f sql/01_schema.sql
-          psql -h localhost -p 5432 -U postgres -d postgres -f sql/02_functions.sql
+          psql -h localhost -p 5432 -U postgres -d postgres -f supabase/migrations/20260820000001_knowledgebase_schema.sql
+          psql -h localhost -p 5432 -U postgres -d postgres -f supabase/migrations/20260820000002_knowledgebase_functions.sql
+          psql -h localhost -p 5432 -U postgres -d postgres -f supabase/migrations/20260823000003_tenant_scoped_access_tokens.sql
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5

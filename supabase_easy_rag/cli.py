@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import typer
@@ -172,10 +173,16 @@ def query_rag(
 def create_token(
     name: str = typer.Argument(..., help="Token descriptive name"),
     expires_in_days: int | None = typer.Option(None, "--expires-days", help="Expiry in days"),
+    tenant_id: str | None = typer.Option(None, "--tenant-id", help="Restrict token to this auth user UUID"),
 ):
     """Generate a new RAG access token and save it to database."""
     client = EasyRagClient()
-    raw_token, row = client.tokens.create_token(name=name)
+    expires_at = None
+    if expires_in_days is not None:
+        if expires_in_days <= 0:
+            raise typer.BadParameter("--expires-days must be greater than zero")
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=expires_in_days)).isoformat()
+    raw_token, row = client.tokens.create_token(name=name, expires_at=expires_at, tenant_id=tenant_id)
 
     rprint("[bold green]✓ Token Created Successfully![/bold green]")
     rprint(f"[bold yellow]Token Secret (save this):[/bold yellow] {raw_token}")
@@ -191,6 +198,7 @@ def list_tokens():
     table = Table(title="Access Tokens")
     table.add_column("ID", style="cyan")
     table.add_column("Name", style="magenta")
+    table.add_column("Tenant", style="blue")
     table.add_column("Active", style="green")
     table.add_column("Last Used", style="yellow")
 
@@ -198,6 +206,7 @@ def list_tokens():
         table.add_row(
             str(tok.get("id")),
             str(tok.get("token_name")),
+            str(tok.get("tenant_id") or "Global"),
             "Yes" if tok.get("is_active") else "No",
             str(tok.get("last_used_at") or "Never"),
         )

@@ -116,6 +116,8 @@ CREATE TABLE IF NOT EXISTS knowledgebase.access_tokens (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     token_name TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
+    -- NULL is a global token; non-NULL restricts token RPCs to this owner's documents.
+    tenant_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     expires_at TIMESTAMPTZ,
     last_used_at TIMESTAMPTZ,

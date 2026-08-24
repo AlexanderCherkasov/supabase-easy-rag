@@ -21,7 +21,7 @@ CREATE OR REPLACE FUNCTION knowledgebase.assert_retrieval_access(p_kb_token TEXT
 RETURNS UUID
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_access_token_id UUID;
@@ -127,14 +127,18 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_token_id UUID;
+    v_tenant_id UUID;
     v_is_rls BOOLEAN;
 BEGIN
     v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
     v_is_rls := (v_token_id IS NULL AND knowledgebase.is_rls_authenticated());
+    IF v_token_id IS NOT NULL THEN
+        SELECT tenant_id INTO v_tenant_id FROM knowledgebase.access_tokens WHERE id = v_token_id;
+    END IF;
 
     IF p_query_embedding IS NULL THEN
         RAISE EXCEPTION 'Query embedding is required';
@@ -166,13 +170,12 @@ BEGIN
         WHERE c.embedding IS NOT NULL
           AND (p_min_vector_similarity IS NULL OR (1 - (c.embedding <=> p_query_embedding)) >= p_min_vector_similarity)
           AND (
-            NOT v_is_rls
-            OR d.owner_id IS NULL
-            OR d.owner_id = auth.uid()
-            OR EXISTS (
+            (NOT v_is_rls AND v_tenant_id IS NULL)
+            OR (NOT v_is_rls AND v_tenant_id IS NOT NULL AND d.owner_id = v_tenant_id)
+            OR (v_is_rls AND (d.owner_id IS NULL OR d.owner_id = auth.uid() OR EXISTS (
                 SELECT 1 FROM knowledgebase.document_owners do2
                 WHERE do2.document_id = d.id AND do2.owner_id = auth.uid()
-            )
+            )))
           )
           AND (
             p_facet_keys IS NULL
@@ -229,7 +232,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 BEGIN
     IF p_query_embedding IS NULL THEN
@@ -302,16 +305,20 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_tsquery tsquery;
     v_token_id UUID;
+    v_tenant_id UUID;
     v_is_rls BOOLEAN;
     v_regconfig regconfig;
 BEGIN
     v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
     v_is_rls := (v_token_id IS NULL AND knowledgebase.is_rls_authenticated());
+    IF v_token_id IS NOT NULL THEN
+        SELECT tenant_id INTO v_tenant_id FROM knowledgebase.access_tokens WHERE id = v_token_id;
+    END IF;
 
     IF p_query IS NULL OR btrim(p_query) = '' THEN
         RAISE EXCEPTION 'Full-text query is required';
@@ -345,20 +352,19 @@ BEGIN
             c.content,
             c.metadata ->> 'facet_path' AS f_path,
             c.metadata AS c_meta,
-            ts_rank(c.search_vector, v_tsquery) AS t_score,
-            ROW_NUMBER() OVER (ORDER BY ts_rank(c.search_vector, v_tsquery) DESC, c.id ASC) AS t_rank
+            ts_rank_cd(c.search_vector, v_tsquery) AS t_score,
+            ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.search_vector, v_tsquery) DESC, c.id ASC) AS t_rank
         FROM knowledgebase.chunks c
         JOIN knowledgebase.documents d ON d.id = c.document_id
         LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
         WHERE c.search_vector @@ v_tsquery
           AND (
-            NOT v_is_rls
-            OR d.owner_id IS NULL
-            OR d.owner_id = auth.uid()
-            OR EXISTS (
+            (NOT v_is_rls AND v_tenant_id IS NULL)
+            OR (NOT v_is_rls AND v_tenant_id IS NOT NULL AND d.owner_id = v_tenant_id)
+            OR (v_is_rls AND (d.owner_id IS NULL OR d.owner_id = auth.uid() OR EXISTS (
                 SELECT 1 FROM knowledgebase.document_owners do2
                 WHERE do2.document_id = d.id AND do2.owner_id = auth.uid()
-            )
+            )))
           )
           AND (
             p_facet_keys IS NULL
@@ -370,7 +376,7 @@ BEGIN
                   AND f.facet_key = ANY (p_facet_keys)
             )
           )
-        ORDER BY ts_rank(c.search_vector, v_tsquery) DESC, d.title ASC
+        ORDER BY ts_rank_cd(c.search_vector, v_tsquery) DESC, d.title ASC
         LIMIT GREATEST(COALESCE(p_match_count, 5), 1)
     )
     SELECT
@@ -413,7 +419,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_tsquery tsquery;
@@ -446,8 +452,8 @@ BEGIN
         SELECT
             c.id, d.id AS doc_id, d.title AS doc_title, ds.heading AS sec_title, c.content,
             c.metadata ->> 'facet_path' AS f_path, c.metadata AS c_meta,
-            ts_rank(c.search_vector, v_tsquery) AS t_score,
-            ROW_NUMBER() OVER (ORDER BY ts_rank(c.search_vector, v_tsquery) DESC, c.id ASC) AS t_rank
+            ts_rank_cd(c.search_vector, v_tsquery) AS t_score,
+            ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.search_vector, v_tsquery) DESC, c.id ASC) AS t_rank
         FROM knowledgebase.chunks c
         JOIN knowledgebase.documents d ON d.id = c.document_id
         LEFT JOIN knowledgebase.document_sections ds ON ds.id = c.section_id
@@ -460,7 +466,7 @@ BEGIN
                 WHERE df.document_id = d.id AND f.facet_key = ANY (p_facet_keys)
             )
           )
-        ORDER BY ts_rank(c.search_vector, v_tsquery) DESC, d.title ASC
+        ORDER BY ts_rank_cd(c.search_vector, v_tsquery) DESC, d.title ASC
 
         LIMIT GREATEST(COALESCE(p_match_count, 5), 1)
     )
@@ -506,11 +512,12 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_tsquery tsquery;
     v_token_id UUID;
+    v_tenant_id UUID;
     v_is_rls BOOLEAN;
     v_candidate_count INT;
     v_rrf_k INT;
@@ -520,6 +527,9 @@ DECLARE
 BEGIN
     v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
     v_is_rls := (v_token_id IS NULL AND knowledgebase.is_rls_authenticated());
+    IF v_token_id IS NOT NULL THEN
+        SELECT tenant_id INTO v_tenant_id FROM knowledgebase.access_tokens WHERE id = v_token_id;
+    END IF;
 
     IF p_query_embedding IS NULL AND (p_query IS NULL OR btrim(p_query) = '') THEN
         RAISE EXCEPTION 'Query text or query embedding is required';
@@ -567,13 +577,12 @@ BEGIN
           AND c.embedding IS NOT NULL
           AND (p_min_vector_similarity IS NULL OR (1 - (c.embedding <=> p_query_embedding)) >= p_min_vector_similarity)
           AND (
-            NOT v_is_rls
-            OR d.owner_id IS NULL
-            OR d.owner_id = auth.uid()
-            OR EXISTS (
+            (NOT v_is_rls AND v_tenant_id IS NULL)
+            OR (NOT v_is_rls AND v_tenant_id IS NOT NULL AND d.owner_id = v_tenant_id)
+            OR (v_is_rls AND (d.owner_id IS NULL OR d.owner_id = auth.uid() OR EXISTS (
                 SELECT 1 FROM knowledgebase.document_owners do2
                 WHERE do2.document_id = d.id AND do2.owner_id = auth.uid()
-            )
+            )))
           )
           AND (
             p_facet_keys IS NULL
@@ -591,20 +600,19 @@ BEGIN
     fts_candidates AS (
         SELECT
             c.id AS chunk_id,
-            ts_rank(c.search_vector, v_tsquery) AS fts_score,
-            ROW_NUMBER() OVER (ORDER BY ts_rank(c.search_vector, v_tsquery) DESC, c.id ASC) AS text_rank
+            ts_rank_cd(c.search_vector, v_tsquery) AS fts_score,
+            ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.search_vector, v_tsquery) DESC, c.id ASC) AS text_rank
         FROM knowledgebase.chunks c
         JOIN knowledgebase.documents d ON d.id = c.document_id
         WHERE v_tsquery IS NOT NULL
           AND c.search_vector @@ v_tsquery
           AND (
-            NOT v_is_rls
-            OR d.owner_id IS NULL
-            OR d.owner_id = auth.uid()
-            OR EXISTS (
+            (NOT v_is_rls AND v_tenant_id IS NULL)
+            OR (NOT v_is_rls AND v_tenant_id IS NOT NULL AND d.owner_id = v_tenant_id)
+            OR (v_is_rls AND (d.owner_id IS NULL OR d.owner_id = auth.uid() OR EXISTS (
                 SELECT 1 FROM knowledgebase.document_owners do2
                 WHERE do2.document_id = d.id AND do2.owner_id = auth.uid()
-            )
+            )))
           )
           AND (
             p_facet_keys IS NULL
@@ -616,7 +624,7 @@ BEGIN
                   AND f.facet_key = ANY (p_facet_keys)
             )
           )
-        ORDER BY ts_rank(c.search_vector, v_tsquery) DESC
+        ORDER BY ts_rank_cd(c.search_vector, v_tsquery) DESC
         LIMIT v_candidate_count
     ),
 
@@ -687,7 +695,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_tsquery tsquery;
@@ -755,8 +763,8 @@ BEGIN
     fts_candidates AS (
         SELECT
             c.id AS chunk_id,
-            ts_rank(c.search_vector, v_tsquery) AS fts_score,
-            ROW_NUMBER() OVER (ORDER BY ts_rank(c.search_vector, v_tsquery) DESC, c.id ASC) AS text_rank
+            ts_rank_cd(c.search_vector, v_tsquery) AS fts_score,
+            ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.search_vector, v_tsquery) DESC, c.id ASC) AS text_rank
         FROM knowledgebase.chunks c
         JOIN knowledgebase.documents d ON d.id = c.document_id
         WHERE v_tsquery IS NOT NULL
@@ -769,7 +777,7 @@ BEGIN
                 WHERE df.document_id = d.id AND f.facet_key = ANY (p_facet_keys)
             )
           )
-        ORDER BY ts_rank(c.search_vector, v_tsquery) DESC
+        ORDER BY ts_rank_cd(c.search_vector, v_tsquery) DESC
         LIMIT v_candidate_count
     ),
 
@@ -829,13 +837,16 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
     v_token_id UUID;
+    v_tenant_id UUID;
 BEGIN
     v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
-    -- facets are public; no extra RLS filter needed
+    IF v_token_id IS NOT NULL THEN
+        SELECT tenant_id INTO v_tenant_id FROM knowledgebase.access_tokens WHERE id = v_token_id;
+    END IF;
     RETURN QUERY
     SELECT
         f.id,
@@ -847,7 +858,9 @@ BEGIN
         COUNT(df.document_id) AS document_count
     FROM knowledgebase.facets f
     LEFT JOIN knowledgebase.document_facets df ON df.facet_id = f.id
-    WHERE p_facet_type IS NULL OR f.facet_type = p_facet_type
+    LEFT JOIN knowledgebase.documents d ON d.id = df.document_id
+    WHERE (p_facet_type IS NULL OR f.facet_type = p_facet_type)
+      AND (v_tenant_id IS NULL OR d.owner_id = v_tenant_id)
     GROUP BY f.id, f.facet_type, f.facet_key, f.label, f.parent_facet_id, f.sort_order
     ORDER BY f.facet_type ASC, f.sort_order ASC, f.label ASC;
 END;
@@ -867,7 +880,7 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET search_path = knowledgebase, public
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 BEGIN
     RETURN QUERY
@@ -890,4 +903,3 @@ GRANT EXECUTE ON FUNCTION knowledgebase.is_rls_authenticated() TO authenticated,
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA knowledgebase TO authenticated, service_role;
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA knowledgebase FROM anon;
 GRANT EXECUTE ON FUNCTION knowledgebase.get_navigation_facets_rls(TEXT) TO anon;
-

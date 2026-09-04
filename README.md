@@ -91,9 +91,9 @@ Empirical evaluation against the **Google Research TyDi QA** multilingual gold-s
 
 | Component | Metric | Value | Details |
 | :--- | :--- | :---: | :--- |
-| **Hybrid SQL Query Latency** | Mean | **21.34 ms** | Single round-trip SQL (pgvector HNSW + FTS GIN + RRF fusion) |
-| | p50 | **21.42 ms** | Zero client-side post-processing |
-| | p95 | **22.09 ms** | Predictable tail latency on PostgreSQL 16 |
+| **Hybrid SQL Query Latency** | Mean | **21.34 ms** |  |
+| | p50 | **21.42 ms** |  |
+| | p95 | **22.09 ms** |  |
 | **Ingestion & Verification** | Throughput | **651.5 docs/sec** | 4,488 documents verified via SHA-256 in **6.89s** (16 workers) |
 
 

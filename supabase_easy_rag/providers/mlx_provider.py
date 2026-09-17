@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from supabase_easy_rag.providers.base import BaseEmbeddingProvider
 
 logger = logging.getLogger(__name__)
+
+MlxDType = Literal["bfloat16", "float16", "float32"]
 
 
 class MlxQwenEmbeddingProvider(BaseEmbeddingProvider):
@@ -24,20 +26,37 @@ class MlxQwenEmbeddingProvider(BaseEmbeddingProvider):
     def __init__(
         self,
         model_path_or_repo: str | Path = "Qwen/Qwen3-Embedding-0.6B",
+        *,
+        batch_size: int | None = None,
         min_batch_size: int = 16,
         max_batch_size: int = 32,
-        max_tokens_per_batch: int = 4096,
-        use_bf16: bool = True,
-        quantize_int8: bool = True,
+        max_length: int = 8192,
+        dtype: MlxDType = "bfloat16",
+        quantization: int | None = 8,
         lazy_load: bool = True,
         default_instruction: str | None = None,
+        use_bf16: bool | None = None,
+        quantize_int8: bool | None = None,
     ) -> None:
         self.model_path_or_repo = str(model_path_or_repo)
+        self.batch_size = batch_size
         self.min_batch_size = min_batch_size
         self.max_batch_size = max_batch_size
-        self.max_tokens_per_batch = max_tokens_per_batch
-        self.use_bf16 = use_bf16
-        self.quantize_int8 = quantize_int8
+        self.max_length = max_length
+
+        # Handle backwards-compatible aliases
+        if use_bf16 is False and dtype == "bfloat16":
+            self.dtype = "float32"
+        else:
+            self.dtype = dtype
+
+        if quantize_int8 is False and quantization == 8:
+            self.quantization = None
+        elif quantize_int8 is True and quantization is None:
+            self.quantization = 8
+        else:
+            self.quantization = quantization
+
         self.default_instruction = default_instruction
 
         self._model: Any = None
@@ -45,6 +64,15 @@ class MlxQwenEmbeddingProvider(BaseEmbeddingProvider):
 
         if not lazy_load:
             self._ensure_loaded()
+
+    @property
+    def use_bf16(self) -> bool:
+        return self.dtype == "bfloat16"
+
+    @property
+    def quantize_int8(self) -> bool:
+        return self.quantization == 8
+
 
     def _ensure_loaded(self) -> None:
         if self._model is not None and self._tokenizer is not None:
@@ -114,20 +142,19 @@ class MlxQwenEmbeddingProvider(BaseEmbeddingProvider):
             from mlx_lm import load
             model, _ = load(self.model_path_or_repo)
 
-        if self.quantize_int8:
-            logger.info("Quantizing model weights to INT8 (bits=8)...")
-            nn.quantize(model, bits=8)
+        if self.quantization in (4, 8):
+            logger.info("Quantizing model weights to %d-bit (bits=%d)...", self.quantization, self.quantization)
+            nn.quantize(model, bits=self.quantization)
 
         self._model = model
 
     def _calculate_dynamic_batch_size(self, texts: Sequence[str]) -> int:
-        """Dynamically compute batch size between min_batch_size (16) and max_batch_size (32)
-
-        Heuristic:
-        - If texts are long on average (> 1000 characters), use min_batch_size (16) to avoid memory spikes.
-        - If texts are short (< 300 characters), use max_batch_size (32) for maximum throughput.
-        - Linearly interpolate in between.
+        """Compute batch size. If batch_size is fixed, returns it.
+        Otherwise dynamically computes batch size between min_batch_size and max_batch_size.
         """
+        if self.batch_size is not None:
+            return self.batch_size
+
         if not texts:
             return self.min_batch_size
 
@@ -139,7 +166,7 @@ class MlxQwenEmbeddingProvider(BaseEmbeddingProvider):
         if avg_len <= 300:
             return self.max_batch_size
 
-        # Interpolate between 16 and 32
+        # Interpolate between min and max
         ratio = (1000 - avg_len) / (1000 - 300)
         dynamic_size = int(self.min_batch_size + ratio * (self.max_batch_size - self.min_batch_size))
         return max(self.min_batch_size, min(self.max_batch_size, dynamic_size))
@@ -149,7 +176,21 @@ class MlxQwenEmbeddingProvider(BaseEmbeddingProvider):
 
         self._ensure_loaded()
 
-        encoded_tokens = [self._tokenizer.encode(t) for t in batch_texts]
+        dtype_map = {
+            "bfloat16": mx.bfloat16,
+            "float16": mx.float16,
+            "float32": mx.float32,
+        }
+        compute_dtype = dtype_map.get(self.dtype, mx.bfloat16)
+
+        encoded_tokens = []
+        for t in batch_texts:
+            try:
+                tokens = self._tokenizer.encode(t, truncation=True, max_length=self.max_length)
+            except TypeError:
+                tokens = self._tokenizer.encode(t)[: self.max_length]
+            encoded_tokens.append(tokens)
+
         max_len = max((len(tok) for tok in encoded_tokens), default=0)
         pad_id = getattr(self._tokenizer, "pad_token_id", 0) or 0
 
@@ -162,7 +203,7 @@ class MlxQwenEmbeddingProvider(BaseEmbeddingProvider):
             masks.append([1.0] * len(tok) + [0.0] * pad_len)
 
         tokens_mx = mx.array(padded, dtype=mx.int32)
-        mask_mx = mx.array(masks, dtype=mx.bfloat16 if self.use_bf16 else mx.float32)
+        mask_mx = mx.array(masks, dtype=compute_dtype)
 
         # Forward pass through model
         if hasattr(self._model, "model") and hasattr(self._model.model, "embed_tokens"):
@@ -173,8 +214,8 @@ class MlxQwenEmbeddingProvider(BaseEmbeddingProvider):
         if hasattr(hidden_states, "last_hidden_state"):
             hidden_states = hidden_states.last_hidden_state
 
-        if self.use_bf16 and hidden_states.dtype != mx.bfloat16:
-            hidden_states = hidden_states.astype(mx.bfloat16)
+        if hidden_states.dtype != compute_dtype:
+            hidden_states = hidden_states.astype(compute_dtype)
 
         # Masked mean pooling
         expanded_mask = mask_mx[:, :, None]

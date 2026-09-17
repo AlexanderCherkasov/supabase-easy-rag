@@ -94,3 +94,27 @@ class TestMlxQwenEmbeddingProvider(unittest.TestCase):
         provider_no_quant = MlxQwenEmbeddingProvider(lazy_load=True, quantize_int8=False)
         self.assertFalse(provider_no_quant.quantize_int8)
 
+    def test_custom_dtype_and_quantization(self):
+        # Test Literal dtype options
+        p_f16 = MlxQwenEmbeddingProvider(lazy_load=True, dtype="float16", quantization=None)
+        self.assertEqual(p_f16.dtype, "float16")
+        self.assertIsNone(p_f16.quantization)
+        self.assertFalse(p_f16.use_bf16)
+        self.assertFalse(p_f16.quantize_int8)
+
+        p_f32 = MlxQwenEmbeddingProvider(lazy_load=True, dtype="float32", quantization=4)
+        self.assertEqual(p_f32.dtype, "float32")
+        self.assertEqual(p_f32.quantization, 4)
+
+    def test_batch_size_and_max_length(self):
+        p_fixed = MlxQwenEmbeddingProvider(
+            lazy_load=True,
+            batch_size=20,
+            max_length=4096,
+        )
+        self.assertEqual(p_fixed.batch_size, 20)
+        self.assertEqual(p_fixed.max_length, 4096)
+        # Fixed batch size should override dynamic batch sizing
+        self.assertEqual(p_fixed._calculate_dynamic_batch_size(["sample"] * 100), 20)
+
+

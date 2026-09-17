@@ -180,7 +180,7 @@ def run_qwen_benchmark(
                         0,
                         '{marked_content}',
                         '{vec_lit}'::vector,
-                        jsonb_build_object('document_key', '{item_key}', 'title', '{clean_title}')
+                        jsonb_build_object('document_key', '{item_key}', 'title', '{clean_title}', 'model', 'Qwen/Qwen3-Embedding-0.6B')
                     );
                 END;
                 $$;
@@ -198,6 +198,11 @@ def run_qwen_benchmark(
         ingest_time = time.perf_counter() - t0_ingest
         throughput = len(docs_to_ingest) / ingest_time if ingest_time > 0 else 0
         print(f" ✓ Ingestion complete: {len(docs_to_ingest)} documents in {ingest_time:.2f}s ({throughput:.1f} docs/sec)")
+
+    # Ensure HNSW vector index for 1024 exists
+    print("\n Ensuring partial HNSW vector index for 1024 dimensions...")
+    res_idx = run_psql("SELECT knowledgebase.ensure_vector_index(1024);", conn_info)
+    print(f" ✓ Index status: {res_idx.stdout.strip()}")
 
     # 4. Retrieval Evaluation Loop
     print(f"\n[4/4] Executing Retrieval Evaluation across {len(qa_items):,} queries...")

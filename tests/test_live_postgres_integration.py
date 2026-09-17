@@ -98,32 +98,27 @@ class TestLivePostgresPgvectorIntegration(unittest.TestCase):
         migrations_dir = repo_root / "supabase" / "migrations"
         migration_files = sorted(migrations_dir.glob("*.sql"))
 
+        # Check if database is already initialized
+        chk_res = _run_psql_query(
+            "SELECT 1 FROM pg_tables WHERE schemaname = 'knowledgebase' AND tablename = 'chunks';",
+            cls.conn_info,
+        )
+        if chk_res.returncode == 0 and "1" in chk_res.stdout:
+            # Ensure latest RPC functions are loaded
+            functions_file = repo_root / "sql" / "02_functions.sql"
+            if functions_file.exists():
+                _run_psql_query(functions_file.read_text(encoding="utf-8"), cls.conn_info)
+            return
+
         if shim_file.exists():
             res_shim = _run_psql_query(shim_file.read_text(encoding="utf-8"), cls.conn_info)
             if res_shim.returncode != 0:
                 raise RuntimeError(f"Failed applying 00_init_supabase_shim.sql: {res_shim.stderr}")
 
-        # Ensure schema migrations table exists
-        _run_psql_query(
-            "CREATE SCHEMA IF NOT EXISTS supabase_migrations; CREATE TABLE IF NOT EXISTS supabase_migrations.schema_migrations (version TEXT PRIMARY KEY);",
-            cls.conn_info,
-        )
-        applied_res = _run_psql_query(
-            "SELECT version FROM supabase_migrations.schema_migrations;",
-            cls.conn_info,
-        )
-        applied_versions = set(applied_res.stdout.split()) if applied_res.returncode == 0 else set()
-
         for mig in migration_files:
-            version = mig.name.split("_")[0]
-            if version not in applied_versions:
-                res = _run_psql_query(mig.read_text(encoding="utf-8"), cls.conn_info)
-                if res.returncode != 0:
-                    raise RuntimeError(f"Failed applying {mig.name}: {res.stderr}")
-                _run_psql_query(
-                    f"INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('{version}') ON CONFLICT DO NOTHING;",
-                    cls.conn_info,
-                )
+            res = _run_psql_query(mig.read_text(encoding="utf-8"), cls.conn_info)
+            if res.returncode != 0:
+                raise RuntimeError(f"Failed applying {mig.name}: {res.stderr}")
 
     def setUp(self):
         self._cleanup()

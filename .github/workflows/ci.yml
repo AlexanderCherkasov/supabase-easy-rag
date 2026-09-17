@@ -47,6 +47,8 @@ jobs:
           psql -h localhost -p 5432 -U postgres -d postgres -f supabase/migrations/20260820000001_knowledgebase_schema.sql
           psql -h localhost -p 5432 -U postgres -d postgres -f supabase/migrations/20260820000002_knowledgebase_functions.sql
           psql -h localhost -p 5432 -U postgres -d postgres -f supabase/migrations/20260823000003_tenant_scoped_access_tokens.sql
+          psql -h localhost -p 5432 -U postgres -d postgres -f supabase/migrations/20260824000004_multitenancy_and_user_scoped_ingestion.sql
+          psql -h localhost -p 5432 -U postgres -d postgres -f supabase/migrations/20260824000005_dynamic_vector_dimensions_and_model_scoping.sql
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5

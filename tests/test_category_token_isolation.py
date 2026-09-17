@@ -146,6 +146,7 @@ class TestCategoryAndTokenIsolation(unittest.TestCase):
             scope_id=self.scope_id,
             include_global=False,
             allowed_categories=["guides"],
+            model_name=None,
         )
 
 

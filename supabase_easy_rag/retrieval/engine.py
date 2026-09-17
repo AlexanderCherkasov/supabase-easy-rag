@@ -144,6 +144,7 @@ class RetrievalEngine:
         scope_id: str | None = None,
         include_global: bool | None = None,
         allowed_categories: Sequence[str] | None = None,
+        model_name: str | None = None,
     ) -> list[SearchResult]:
         if not self.provider:
             raise EasyRagError("Embedding provider is required for vector search")
@@ -162,6 +163,9 @@ class RetrievalEngine:
             params["p_include_global"] = include_global
         if allowed_categories is not None:
             params["p_allowed_categories"] = list(allowed_categories)
+        resolved_model = model_name if model_name is not None else getattr(self.provider, "model_name", None)
+        if isinstance(resolved_model, str) and resolved_model.strip():
+            params["p_model_name"] = resolved_model.strip()
 
         # RLS mode: call _rls variant without token (auth.uid() enforced)
         if use_rls or kb_token is None:
@@ -231,6 +235,7 @@ class RetrievalEngine:
         scope_id: str | None = None,
         include_global: bool | None = None,
         allowed_categories: Sequence[str] | None = None,
+        model_name: str | None = None,
     ) -> list[SearchResult]:
         query_vector: list[float] | None = None
         if self.provider:
@@ -261,6 +266,9 @@ class RetrievalEngine:
             params["p_include_global"] = include_global
         if allowed_categories is not None:
             params["p_allowed_categories"] = list(allowed_categories)
+        resolved_model = model_name if model_name is not None else getattr(self.provider, "model_name", None)
+        if isinstance(resolved_model, str) and resolved_model.strip():
+            params["p_model_name"] = resolved_model.strip()
 
         if use_rls or kb_token is None:
             data = self._rpc("search_chunks_hybrid_rls", params)
@@ -393,6 +401,7 @@ class AsyncRetrievalEngine:
         scope_id: str | None = None,
         include_global: bool | None = None,
         allowed_categories: Sequence[str] | None = None,
+        model_name: str | None = None,
     ) -> list[SearchResult]:
         if not self.provider:
             raise EasyRagError("Embedding provider is required for vector search")
@@ -411,6 +420,9 @@ class AsyncRetrievalEngine:
             params["p_include_global"] = include_global
         if allowed_categories is not None:
             params["p_allowed_categories"] = list(allowed_categories)
+        resolved_model = model_name if model_name is not None else getattr(self.provider, "model_name", None)
+        if isinstance(resolved_model, str) and resolved_model.strip():
+            params["p_model_name"] = resolved_model.strip()
 
         if use_rls or kb_token is None:
             data = await self._rpc("match_chunks_by_embedding_rls", params)
@@ -479,6 +491,7 @@ class AsyncRetrievalEngine:
         scope_id: str | None = None,
         include_global: bool | None = None,
         allowed_categories: Sequence[str] | None = None,
+        model_name: str | None = None,
     ) -> list[SearchResult]:
         query_vector: list[float] | None = None
         if self.provider:
@@ -507,6 +520,9 @@ class AsyncRetrievalEngine:
             params["p_include_global"] = include_global
         if allowed_categories is not None:
             params["p_allowed_categories"] = list(allowed_categories)
+        resolved_model = model_name if model_name is not None else getattr(self.provider, "model_name", None)
+        if isinstance(resolved_model, str) and resolved_model.strip():
+            params["p_model_name"] = resolved_model.strip()
 
         if use_rls or kb_token is None:
             data = await self._rpc("search_chunks_hybrid_rls", params)

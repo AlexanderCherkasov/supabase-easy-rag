@@ -63,13 +63,14 @@ CREATE TABLE IF NOT EXISTS knowledgebase.document_sections (
 CREATE TABLE IF NOT EXISTS knowledgebase.chunks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id UUID NOT NULL REFERENCES knowledgebase.documents(id) ON DELETE CASCADE,
+    tenant_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
     section_id UUID REFERENCES knowledgebase.document_sections(id) ON DELETE SET NULL,
     chunk_index INT NOT NULL DEFAULT 0,
     content TEXT NOT NULL,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     token_count INT,
     char_count INT,
-    embedding VECTOR(1536), -- Configurable dimensions via: easy-rag init-sql --dimensions <DIM>
+    embedding VECTOR, -- Unconstrained VECTOR. Partial HNSW indexes managed per tenant & dimension.
     search_vector tsvector,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -209,6 +210,19 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Auto-sync tenant_id from document on chunk insert/update
+CREATE OR REPLACE FUNCTION knowledgebase.chunks_populate_tenant_trigger()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.tenant_id IS NULL THEN
+        SELECT tenant_id INTO NEW.tenant_id
+        FROM knowledgebase.documents
+        WHERE id = NEW.document_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_kb_documents_owner ON knowledgebase.documents(owner_id);
 CREATE INDEX IF NOT EXISTS idx_kb_documents_tenant_scope ON knowledgebase.documents(tenant_id, scope_id);
@@ -216,10 +230,11 @@ CREATE INDEX IF NOT EXISTS idx_kb_ingestion_tenant_user ON knowledgebase.ingesti
 CREATE INDEX IF NOT EXISTS idx_kb_doc_owners_doc ON knowledgebase.document_owners(document_id);
 CREATE INDEX IF NOT EXISTS idx_kb_doc_owners_owner ON knowledgebase.document_owners(owner_id);
 CREATE INDEX IF NOT EXISTS idx_kb_sections_doc_id ON knowledgebase.document_sections(document_id);
-CREATE INDEX IF NOT EXISTS idx_kb_sections_parent ON knowledgebase.document_sections(parent_section_id);
 CREATE INDEX IF NOT EXISTS idx_kb_chunks_doc_id ON knowledgebase.chunks(document_id);
+CREATE INDEX IF NOT EXISTS idx_kb_chunks_tenant ON knowledgebase.chunks(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_kb_chunks_section_id ON knowledgebase.chunks(section_id);
-CREATE INDEX IF NOT EXISTS idx_kb_chunks_embedding ON knowledgebase.chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE INDEX IF NOT EXISTS idx_kb_chunks_hnsw_g_1536 ON knowledgebase.chunks USING hnsw (((embedding)::vector(1536)) vector_cosine_ops) WITH (m = 16, ef_construction = 64) WHERE tenant_id IS NULL AND vector_dims(embedding) = 1536;
+CREATE INDEX IF NOT EXISTS idx_kb_chunks_hnsw_g_1024 ON knowledgebase.chunks USING hnsw (((embedding)::vector(1024)) vector_cosine_ops) WITH (m = 16, ef_construction = 64) WHERE tenant_id IS NULL AND vector_dims(embedding) = 1024;
 CREATE INDEX IF NOT EXISTS idx_kb_chunks_fts ON knowledgebase.chunks USING gin(search_vector);
 CREATE INDEX IF NOT EXISTS idx_kb_facets_parent ON knowledgebase.facets(parent_facet_id);
 CREATE INDEX IF NOT EXISTS idx_kb_facets_type ON knowledgebase.facets(facet_type);
@@ -246,7 +261,12 @@ CREATE TRIGGER update_kb_ingestion_updated_at BEFORE UPDATE ON knowledgebase.ing
 DROP TRIGGER IF EXISTS update_kb_tokens_updated_at ON knowledgebase.access_tokens;
 CREATE TRIGGER update_kb_tokens_updated_at BEFORE UPDATE ON knowledgebase.access_tokens FOR EACH ROW EXECUTE FUNCTION knowledgebase.update_updated_at_column();
 
--- Triggers for Weighted FTS Search Vector
+-- Triggers for Weighted FTS Search Vector & Tenant Sync
+DROP TRIGGER IF EXISTS trigger_kb_chunks_populate_tenant ON knowledgebase.chunks;
+CREATE TRIGGER trigger_kb_chunks_populate_tenant
+BEFORE INSERT OR UPDATE OF document_id ON knowledgebase.chunks
+FOR EACH ROW EXECUTE FUNCTION knowledgebase.chunks_populate_tenant_trigger();
+
 DROP TRIGGER IF EXISTS trigger_kb_chunks_search_vector ON knowledgebase.chunks;
 CREATE TRIGGER trigger_kb_chunks_search_vector
 BEFORE INSERT OR UPDATE

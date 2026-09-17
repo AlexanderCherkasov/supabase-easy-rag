@@ -15,6 +15,7 @@ services:
       - ./supabase/migrations/20260820000002_knowledgebase_functions.sql:/docker-entrypoint-initdb.d/02_functions.sql:ro
       - ./supabase/migrations/20260823000003_tenant_scoped_access_tokens.sql:/docker-entrypoint-initdb.d/03_tenant_scoped_access_tokens.sql:ro
       - ./supabase/migrations/20260824000004_multitenancy_and_user_scoped_ingestion.sql:/docker-entrypoint-initdb.d/04_multitenancy_and_user_scoped_ingestion.sql:ro
+      - ./supabase/migrations/20260824000005_dynamic_vector_dimensions_and_model_scoping.sql:/docker-entrypoint-initdb.d/05_dynamic_vector_dimensions_and_model_scoping.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 5s

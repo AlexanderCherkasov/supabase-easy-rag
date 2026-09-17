@@ -350,6 +350,9 @@ class DocumentSyncer:
                 chunk_meta = {**doc.metadata, "document_key": doc.document_key}
                 if doc.facet_path:
                     chunk_meta["facet_path"] = doc.facet_path
+                provider_model = getattr(self.provider, "model_name", None) or getattr(self.provider, "model", None)
+                if provider_model:
+                    chunk_meta["model"] = provider_model
                 chunk_payloads.append(
                     {
                         "document_id": doc_id,

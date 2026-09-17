@@ -109,6 +109,7 @@ def query_rag(
     fts_config: str = typer.Option("english", "--fts-config", help="Text search config (e.g. english, russian, simple)"),
     min_similarity: float | None = typer.Option(None, "--min-similarity", help="Minimum cosine vector similarity threshold"),
     candidate_count: int | None = typer.Option(None, "--candidate-count", help="Oversampling candidate count"),
+    model: str | None = typer.Option(None, "--model", help="Filter search results by embedding model name"),
 ):
     """Query the Supabase RAG engine directly from terminal with RRF rank fusion."""
     client = _make_client(user_jwt=user_jwt, use_rls=use_rls or bool(user_jwt))
@@ -124,6 +125,7 @@ def query_rag(
             match_count=match_count,
             min_vector_similarity=min_similarity,
             use_rls=bool(use_rls or user_jwt),
+            model_name=model,
         )
     elif mode == "fts":
         results = client.search_fts(
@@ -145,6 +147,7 @@ def query_rag(
             fts_config=fts_config,
             min_vector_similarity=min_similarity,
             use_rls=bool(use_rls or user_jwt),
+            model_name=model,
         )
 
     table = Table(title=f"RAG Search Results ({mode.upper()})")
@@ -214,6 +217,57 @@ def list_tokens():
     console.print(table)
 
 
+@app.command("list-indexes")
+def list_indexes(
+    tenant_id: str | None = typer.Option(None, "--tenant-id", help="Filter vector indexes by tenant UUID"),
+):
+    """List all active partial HNSW vector indexes across tenants and dimensions."""
+    client = EasyRagClient()
+    indexes = client.indexes.list_vector_indexes(tenant_id=tenant_id)
+
+    table = Table(title="PostgreSQL Vector Indexes (knowledgebase.chunks)")
+    table.add_column("Index Name", style="cyan")
+    table.add_column("Tenant ID", style="blue")
+    table.add_column("Dimension", style="magenta")
+    table.add_column("Global", style="green")
+    table.add_column("Definition", style="yellow")
+
+    for idx in indexes:
+        table.add_row(
+            str(idx.get("index_name")),
+            str(idx.get("tenant_id") or "-"),
+            str(idx.get("dimension") or "Unknown"),
+            "Yes" if idx.get("is_global") else "No",
+            str(idx.get("index_def")),
+        )
+
+    console.print(table)
+
+
+@app.command("ensure-index")
+def ensure_index(
+    dimension: int = typer.Argument(..., help="Vector dimension to index (e.g. 1536, 1024, 768, 384)"),
+    tenant_id: str | None = typer.Option(None, "--tenant-id", help="Optional tenant UUID for tenant-isolated index"),
+    m: int = typer.Option(16, "--m", help="HNSW m parameter (max outgoing links per node)"),
+    ef_construction: int = typer.Option(64, "--ef-construction", help="HNSW ef_construction parameter"),
+):
+    """Create or ensure an HNSW index for the specified vector dimension and optional tenant."""
+    client = EasyRagClient()
+    res = client.indexes.ensure_vector_index(dimension=dimension, tenant_id=tenant_id, m=m, ef_construction=ef_construction)
+    rprint(f"[bold green]✓ {res}[/bold green]")
+
+
+@app.command("drop-index")
+def drop_index(
+    dimension: int = typer.Argument(..., help="Vector dimension of the index to drop"),
+    tenant_id: str | None = typer.Option(None, "--tenant-id", help="Optional tenant UUID of the index to drop"),
+):
+    """Drop an HNSW vector index for the specified dimension and optional tenant."""
+    client = EasyRagClient()
+    res = client.indexes.drop_vector_index(dimension=dimension, tenant_id=tenant_id)
+    rprint(f"[bold yellow]✓ {res}[/bold yellow]")
+
+
 @app.command("bench-qwen")
 def bench_qwen():
     """Run full benchmark for Qwen3-Embedding-0.6B (MLX INT8+BF16) on local Supabase."""
@@ -223,3 +277,4 @@ def bench_qwen():
 
 if __name__ == "__main__":
     app()
+

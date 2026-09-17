@@ -22,7 +22,7 @@ class TestPostgresRetrievalPlansAndBenchmarks(unittest.TestCase):
         # Verify key clauses in schema
         self.assertIn("CREATE EXTENSION IF NOT EXISTS vector;", schema_sql)
         self.assertIn("CREATE SCHEMA IF NOT EXISTS knowledgebase;", schema_sql)
-        self.assertIn("idx_kb_chunks_embedding ON knowledgebase.chunks USING hnsw", schema_sql)
+        self.assertIn("idx_kb_chunks_hnsw_g_1536 ON knowledgebase.chunks USING hnsw", schema_sql)
         self.assertIn("idx_kb_chunks_fts ON knowledgebase.chunks USING gin(search_vector)", schema_sql)
         self.assertIn("chunks_search_vector_trigger", schema_sql)
         self.assertIn("setweight(", schema_sql)

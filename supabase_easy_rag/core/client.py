@@ -7,6 +7,7 @@ from typing import Any
 from supabase_easy_rag.config import EasyRagConfig
 from supabase_easy_rag.core.exceptions import EasyRagConfigurationError
 from supabase_easy_rag.core.models import SearchResult
+from supabase_easy_rag.indexes.manager import AsyncIndexManager, IndexManager
 from supabase_easy_rag.ingestion.syncer import DocumentSyncer
 from supabase_easy_rag.providers.base import BaseEmbeddingProvider
 from supabase_easy_rag.retrieval.engine import RetrievalEngine
@@ -98,6 +99,10 @@ class EasyRagClient:
             postgrest_client=self.postgrest,
             schema_name=self.config.schema_name,
         )
+        self.indexes: IndexManager = IndexManager(
+            postgrest_client=self.postgrest,
+            schema_name=self.config.schema_name,
+        )
 
     def for_user(
         self,
@@ -140,6 +145,7 @@ class EasyRagClient:
         scope_id: str | None = None,
         include_global: bool | None = None,
         allowed_categories: Sequence[str] | None = None,
+        model_name: str | None = None,
     ) -> list[SearchResult]:
         resolved_cand = candidate_count if candidate_count is not None else self.config.candidate_count
         resolved_rrf_k = rrf_k if rrf_k is not None else self.config.rrf_k
@@ -169,6 +175,7 @@ class EasyRagClient:
                 scope_id=resolved_scope,
                 include_global=resolved_global,
                 allowed_categories=allowed_categories,
+                model_name=model_name,
             )
         token: str = kb_token or self.config.knowledgebase_access_token
         return self.retrieval.search_hybrid(
@@ -188,6 +195,7 @@ class EasyRagClient:
             scope_id=resolved_scope,
             include_global=resolved_global,
             allowed_categories=allowed_categories,
+            model_name=model_name,
         )
 
     def search_vector(
@@ -203,6 +211,7 @@ class EasyRagClient:
         scope_id: str | None = None,
         include_global: bool | None = None,
         allowed_categories: Sequence[str] | None = None,
+        model_name: str | None = None,
     ) -> list[SearchResult]:
         resolved_min_sim = min_vector_similarity if min_vector_similarity is not None else self.config.min_vector_similarity
         resolved_tenant = tenant_id if tenant_id is not None else self.tenant_id
@@ -222,6 +231,7 @@ class EasyRagClient:
                 scope_id=resolved_scope,
                 include_global=resolved_global,
                 allowed_categories=allowed_categories,
+                model_name=model_name,
             )
         token = kb_token or self.config.knowledgebase_access_token
         return self.retrieval.search_vector(
@@ -236,6 +246,7 @@ class EasyRagClient:
             scope_id=resolved_scope,
             include_global=resolved_global,
             allowed_categories=allowed_categories,
+            model_name=model_name,
         )
 
     def search_fts(
@@ -385,6 +396,10 @@ class AsyncEasyRagClient:
             embedding_provider=self.provider,
             schema_name=self.config.schema_name,
         )
+        self.indexes: AsyncIndexManager = AsyncIndexManager(
+            postgrest_client=self.postgrest,
+            schema_name=self.config.schema_name,
+        )
 
     def for_user(
         self,
@@ -427,6 +442,7 @@ class AsyncEasyRagClient:
         scope_id: str | None = None,
         include_global: bool | None = None,
         allowed_categories: Sequence[str] | None = None,
+        model_name: str | None = None,
     ) -> list[SearchResult]:
         resolved_cand = candidate_count if candidate_count is not None else self.config.candidate_count
         resolved_rrf_k = rrf_k if rrf_k is not None else self.config.rrf_k
@@ -456,6 +472,7 @@ class AsyncEasyRagClient:
                 scope_id=resolved_scope,
                 include_global=resolved_global,
                 allowed_categories=allowed_categories,
+                model_name=model_name,
             )
         token: str = kb_token or self.config.knowledgebase_access_token
         return await self.retrieval.search_hybrid(
@@ -475,6 +492,7 @@ class AsyncEasyRagClient:
             scope_id=resolved_scope,
             include_global=resolved_global,
             allowed_categories=allowed_categories,
+            model_name=model_name,
         )
 
     async def search_vector(
@@ -490,6 +508,7 @@ class AsyncEasyRagClient:
         scope_id: str | None = None,
         include_global: bool | None = None,
         allowed_categories: Sequence[str] | None = None,
+        model_name: str | None = None,
     ) -> list[SearchResult]:
         resolved_min_sim = min_vector_similarity if min_vector_similarity is not None else self.config.min_vector_similarity
         resolved_tenant = tenant_id if tenant_id is not None else self.tenant_id
@@ -509,6 +528,7 @@ class AsyncEasyRagClient:
                 scope_id=resolved_scope,
                 include_global=resolved_global,
                 allowed_categories=allowed_categories,
+                model_name=model_name,
             )
         token = kb_token or self.config.knowledgebase_access_token
         return await self.retrieval.search_vector(
@@ -523,6 +543,7 @@ class AsyncEasyRagClient:
             scope_id=resolved_scope,
             include_global=resolved_global,
             allowed_categories=allowed_categories,
+            model_name=model_name,
         )
 
     async def search_fts(

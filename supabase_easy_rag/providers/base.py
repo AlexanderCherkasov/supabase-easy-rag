@@ -17,3 +17,10 @@ class BaseEmbeddingProvider(ABC):
         if not results:
             raise RuntimeError("Embedding provider returned empty result for query")
         return results[0]
+
+    @property
+    def model_name(self) -> str | None:
+        """Name or identifier of the embedding model."""
+        return getattr(self, "_model_name", None) or getattr(self, "model", None) or getattr(self, "model_path_or_repo", None)
+
+

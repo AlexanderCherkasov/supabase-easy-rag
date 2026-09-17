@@ -2,7 +2,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     container_name: easy_rag_test_postgres
-    restart: unless-stopped
+    restart: "no"
     ports:
       - "5432:5432"
     environment:

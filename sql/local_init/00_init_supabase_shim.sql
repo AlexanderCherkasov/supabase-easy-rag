@@ -32,7 +32,7 @@ BEGIN
 END;
 $$;
 
--- 3. Create standard auth.uid() function if not already present
+-- 3. Create standard auth.uid() and auth.jwt() functions if not already present
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -48,6 +48,25 @@ BEGIN
                 nullif(current_setting('request.jwt.claim.sub', true), ''),
                 (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
             )::uuid;
+        $func$;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_proc p
+        JOIN pg_namespace n ON p.pronamespace = n.oid
+        WHERE n.nspname = 'auth' AND p.proname = 'jwt'
+    ) THEN
+        CREATE OR REPLACE FUNCTION auth.jwt()
+        RETURNS JSONB
+        LANGUAGE sql STABLE
+        AS $func$
+            SELECT COALESCE(
+                nullif(current_setting('request.jwt.claims', true), '')::jsonb,
+                jsonb_build_object(
+                    'sub', current_setting('request.jwt.claim.sub', true),
+                    'role', current_setting('request.jwt.claim.role', true)
+                )
+            );
         $func$;
     END IF;
 END;

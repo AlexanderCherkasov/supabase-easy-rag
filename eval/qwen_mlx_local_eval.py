@@ -45,7 +45,7 @@ def run_psql(sql: str, conn_info: Dict[str, str]) -> subprocess.CompletedProcess
     return subprocess.run(cmd, capture_output=True, text=True, env=env)
 
 
-def to_pgvector_literal(vec: List[float], target_dim: int = 1536) -> str:
+def to_pgvector_literal(vec: List[float], target_dim: int = 1024) -> str:
     if len(vec) < target_dim:
         padded = (vec + [0.0] * (target_dim - len(vec)))[:target_dim]
     else:
@@ -156,7 +156,7 @@ def run_qwen_benchmark(
             for item, emb in zip(batch, embeddings):
                 item_key = item["key"]
                 clean_title = item["title"].replace("'", "''")
-                vec_lit = to_pgvector_literal(emb, 1536)
+                vec_lit = to_pgvector_literal(emb, 1024)
                 marked_content = f"[TYDI_EVAL] {item['content']}".replace("'", "''")
 
                 sql_statements.append(f"""
@@ -226,7 +226,7 @@ def run_qwen_benchmark(
             t_emb_start = time.perf_counter()
             if mode in ("vector", "hybrid"):
                 q_vec = provider.embed_query(q_text)
-                q_vec_lit = to_pgvector_literal(q_vec, 1536)
+                q_vec_lit = to_pgvector_literal(q_vec, 1024)
             else:
                 q_vec_lit = "NULL"
             t_emb_end = time.perf_counter()

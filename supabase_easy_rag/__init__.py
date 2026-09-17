@@ -16,7 +16,7 @@ from supabase_easy_rag.core.models import (
     SectionDefinition,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 __all__ = [

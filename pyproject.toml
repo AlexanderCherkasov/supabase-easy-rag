@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "supabase-easy-rag"
-version = "0.3.0"
+version = "0.4.0"
 description = "Production-ready, lightweight Hybrid RAG (Vector + Full-Text Search + Facets) engine for Supabase."
 
 readme = "README.md"
@@ -23,7 +23,7 @@ classifiers = [
     "Topic :: Database",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-keywords = ["supabase", "rag", "vector", "pgvector", "hybrid-search", "embeddings", "postgrest"]
+keywords = ["supabase", "rag", "vector", "pgvector", "hybrid-search", "embeddings", "postgrest", "mlx"]
 requires-python = ">=3.10"
 dependencies = [
     "postgrest>=0.10.0,<1.0.0",
@@ -39,6 +39,11 @@ dependencies = [
 openai = ["openai>=1.0.0"]
 azure = ["openai>=1.0.0"]
 async = ["httpx>=0.24.0"]
+mlx = [
+    "mlx>=0.16.0; sys_platform == 'darwin'",
+    "mlx-lm>=0.18.0; sys_platform == 'darwin'",
+    "transformers>=4.40.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",

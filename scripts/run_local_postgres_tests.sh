@@ -44,6 +44,7 @@ docker compose -f docker-compose.test.yml exec -T postgres psql -U postgres -d p
 docker compose -f docker-compose.test.yml exec -T postgres psql -U postgres -d postgres -f /docker-entrypoint-initdb.d/01_schema.sql
 docker compose -f docker-compose.test.yml exec -T postgres psql -U postgres -d postgres -f /docker-entrypoint-initdb.d/02_functions.sql
 docker compose -f docker-compose.test.yml exec -T postgres psql -U postgres -d postgres -f /docker-entrypoint-initdb.d/03_tenant_scoped_access_tokens.sql
+docker compose -f docker-compose.test.yml exec -T postgres psql -U postgres -d postgres -f /docker-entrypoint-initdb.d/04_multitenancy_and_user_scoped_ingestion.sql
 echo " ✓ Migrations applied successfully!"
 
 # 5. Run Live Integration Tests

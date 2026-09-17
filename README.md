@@ -177,26 +177,53 @@ async_client = AsyncEasyRagClient()
 results = await async_client.search_hybrid(
     query="Distributed consensus election timeouts",
     match_count=3,
-    expand_context="section",
 )
+```
+
+### 4. Dynamic Vector Dimensions & Partial Index Management
+
+PostgreSQL `chunks.embedding` uses unconstrained `VECTOR` with partial HNSW indexes partitioned by `(tenant_id, dimension)`:
+
+```python
+# List active vector indexes across tenants and dimensions
+indexes = client.indexes.list_vector_indexes()
+
+# Ensure an HNSW index for Qwen3 1024-dim or OpenAI 1536-dim
+client.indexes.ensure_vector_index(dimension=1024, m=16, ef_construction=64)
+
+# Drop an obsolete vector index
+client.indexes.drop_vector_index(dimension=768)
+```
+
+### 5. Apple Silicon MLX Local Embedding Provider
+
+Accelerated on-device embeddings with Apple Metal and INT8/BF16 quantization:
+
+```python
+from supabase_easy_rag.providers.mlx_provider import MlxQwenEmbeddingProvider
+
+# Run Qwen3-Embedding-0.6B locally on Apple Silicon
+mlx_provider = MlxQwenEmbeddingProvider(
+    model_path_or_repo="Qwen/Qwen3-Embedding-0.6B",
+    quantize_int8=True,
+    use_bf16=True,
+)
+
+client = EasyRagClient(embedding_provider=mlx_provider)
 ```
 
 ---
 
 ## 🧪 Local Docker & CI Testing
 
-Run the full integration test suite against a local PostgreSQL container with pgvector:
+Run the full integration test suite (89 tests) against a local PostgreSQL container with pgvector:
 
 ```bash
-# 1. Start local Postgres container with pgvector and run all 59 tests:
-./scripts/run_local_postgres_tests.sh
-
-# Or run via docker-compose manually:
+# 1. Start local Postgres test container:
 docker compose -f docker-compose.test.yml up -d
-POSTGRES_URL="postgresql://postgres:postgres@localhost:5432/postgres" python -m unittest discover tests -v
 
-# Run local Postgres retrieval evaluation:
-POSTGRES_URL="postgresql://postgres:postgres@localhost:5432/postgres" python eval/local_postgres_eval.py
+# 2. Run the complete test suite:
+POSTGRES_URL="postgresql://postgres:postgres@localhost:5432/postgres" pytest tests/ -v
 ```
 
 ---
@@ -205,13 +232,18 @@ POSTGRES_URL="postgresql://postgres:postgres@localhost:5432/postgres" python eva
 
 ```bash
 # Export migration files
-easy-rag init-sql --dimensions 1536 --output ./migrations
+easy-rag init-sql --output ./migrations
 
 # Sync directory of documents
 easy-rag sync ./docs --workers 8
 
-# Execute test query with diagnostics
-easy-rag query "What is distributed erasure coding?" --mode hybrid --count 5
+# Execute test query with diagnostics & optional model filter
+easy-rag query "What is distributed erasure coding?" --mode hybrid --count 5 --model "Qwen/Qwen3-Embedding-0.6B"
+
+# Manage dynamic vector indexes
+easy-rag list-indexes [--tenant-id <UUID>]
+easy-rag ensure-index 1024 [--m 16] [--ef-construction 64]
+easy-rag drop-index 768
 
 # Manage backend API access tokens
 easy-rag create-token "Production Ingestion Worker"
@@ -222,6 +254,7 @@ easy-rag list-tokens
 
 ## ⚙️ Architecture & Implementation Details
 
+- **Dynamic Vector Dimensions**: `knowledgebase.chunks.embedding` is stored as unconstrained `VECTOR`. Partial HNSW indexes (`idx_kb_chunks_hnsw_g_<dim>` and `idx_kb_chunks_hnsw_t_<tenant>_<dim>`) provide maximum query performance without dimension constraint errors.
 - **Two-Stage Hybrid Fusion**: Independent candidate pools are retrieved via indexed scans (`HNSW` for vector distance, `GIN` for full-text match) and fused using Reciprocal Rank Fusion:
   $$RRF\_Score = \frac{w_v}{k + rank_v} + \frac{w_t}{k + rank_t}$$
   This avoids arbitrary score normalization issues between cosine similarities and BM25/FTS weights.

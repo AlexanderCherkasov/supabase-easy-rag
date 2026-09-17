@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "supabase-easy-rag"
-version = "0.4.0"
-description = "Production-ready, lightweight Hybrid RAG (Vector + Full-Text Search + Facets) engine for Supabase."
+version = "0.5.0"
+description = "Production-ready, lightweight Hybrid RAG (Dynamic Vector + Full-Text Search + Facets) engine for Supabase."
 
 readme = "README.md"
 authors = [

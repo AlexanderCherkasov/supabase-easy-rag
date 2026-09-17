@@ -69,10 +69,9 @@ class DocumentSyncer:
         self.client = postgrest_client
         self.provider = embedding_provider
         self.schema_name = schema_name
-        cfg = EasyRagConfig.from_env()
-        self.enable_chunking = enable_chunking if enable_chunking is not None else cfg.enable_chunking
-        self.chunk_size = chunk_size or cfg.chunk_size
-        self.chunk_overlap = chunk_overlap or cfg.chunk_overlap
+        self.enable_chunking = enable_chunking if enable_chunking is not None else True
+        self.chunk_size = chunk_size or 800
+        self.chunk_overlap = chunk_overlap or 100
 
     def _table(self, name: str):
         return self.client.schema(self.schema_name).table(name)
@@ -90,6 +89,8 @@ class DocumentSyncer:
         chunk_overlap: int | None = None,
         max_workers: int = 4,
         force: bool = False,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
     ) -> dict[str, Any]:
         """Sync markdown files. Owner handling per RAG with Permissions guide:
 
@@ -98,6 +99,8 @@ class DocumentSyncer:
         - enable_chunking: True to split into chunks, False to store whole doc as single chunk
         - max_workers: Number of parallel worker threads for batch ingestion
         - force: If True, re-processes and re-chunks all documents regardless of checksum
+        - tenant_id: Optional UUID of tenant in supabase-multitenancy
+        - scope_id: Optional UUID of project / scope in supabase-multitenancy
         """
         source_root = source_root.resolve()
         markdown_files = sorted(p for p in source_root.rglob("*.md") if p.is_file())
@@ -111,17 +114,21 @@ class DocumentSyncer:
             return {"files_seen": 0, "files_changed": 0, "status": "completed"}
 
         # 1. Log ingestion run start
+        run_payload: dict[str, Any] = {
+            "status": "running",
+            "source_root": str(source_root),
+            "files_seen": len(markdown_files),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if tenant_id:
+            run_payload["tenant_id"] = tenant_id
+        if owner_id:
+            run_payload["user_id"] = owner_id
+
         run_response = run_with_retry(
             "start_ingestion_run",
             lambda: self._table("ingestion_runs")
-            .insert(
-                {
-                    "status": "running",
-                    "source_root": str(source_root),
-                    "files_seen": len(markdown_files),
-                    "started_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
+            .insert(run_payload)
             .execute(),
         )
         run_id = (run_response.data or [{}])[0].get("id")
@@ -177,6 +184,8 @@ class DocumentSyncer:
                         enable_chunking=enable_chunking,
                         chunk_size=chunk_size,
                         chunk_overlap=chunk_overlap,
+                        tenant_id=tenant_id,
+                        scope_id=scope_id,
                     )
 
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -193,6 +202,8 @@ class DocumentSyncer:
                         enable_chunking=enable_chunking,
                         chunk_size=chunk_size,
                         chunk_overlap=chunk_overlap,
+                        tenant_id=tenant_id,
+                        scope_id=scope_id,
                     )
 
             # 6. Mark ingestion run completed
@@ -231,6 +242,8 @@ class DocumentSyncer:
         enable_chunking: bool | None = None,
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
     ) -> None:
         if not docs:
             return
@@ -284,6 +297,10 @@ class DocumentSyncer:
                 doc_payload["owner_id"] = effective_owner
             elif visibility == "public":
                 doc_payload["owner_id"] = None
+            if tenant_id is not None:
+                doc_payload["tenant_id"] = tenant_id
+            if scope_id is not None:
+                doc_payload["scope_id"] = scope_id
             if doc.document_key in existing_map:
                 doc_id = existing_map[doc.document_key]["id"]
                 run_with_retry(

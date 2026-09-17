@@ -57,6 +57,9 @@ class EasyRagConfig:
     text_weight: float = 1.0
     candidate_count: int | None = None
     min_vector_similarity: float | None = None
+    tenant_id: str | None = None
+    scope_id: str | None = None
+    include_global: bool = True
 
     @classmethod
     def from_env(cls) -> EasyRagConfig:
@@ -138,6 +141,9 @@ class EasyRagConfig:
             text_weight=float(os.getenv("KNOWLEDGEBASE_TEXT_WEIGHT", "1.0")),
             candidate_count=cand_count,
             min_vector_similarity=min_sim,
+            tenant_id=os.getenv("KNOWLEDGEBASE_TENANT_ID"),
+            scope_id=os.getenv("KNOWLEDGEBASE_SCOPE_ID"),
+            include_global=os.getenv("KNOWLEDGEBASE_INCLUDE_GLOBAL", "true").lower() in ("1", "true", "yes", "on"),
         )
 
 

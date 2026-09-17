@@ -236,7 +236,7 @@ CREATE TRIGGER update_kb_tokens_updated_at BEFORE UPDATE ON knowledgebase.access
 -- Triggers for Weighted FTS Search Vector
 DROP TRIGGER IF EXISTS trigger_kb_chunks_search_vector ON knowledgebase.chunks;
 CREATE TRIGGER trigger_kb_chunks_search_vector
-BEFORE INSERT OR UPDATE OF document_id, section_id, content, metadata
+BEFORE INSERT OR UPDATE
 ON knowledgebase.chunks
 FOR EACH ROW EXECUTE FUNCTION knowledgebase.chunks_search_vector_trigger();
 

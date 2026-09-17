@@ -1,104 +1,408 @@
 -- ============================================================================
--- Supabase Easy RAG: PostgreSQL RPC Functions
--- Security Token Audit + Vector, Full-Text, and Hybrid Search RPCs
--- Supports TWO auth modes (see 01_schema.sql RLS guide):
---   1) Service-role / Machine token (p_kb_token) via assert_retrieval_access
---   2) Fine-grained RLS via auth.uid() — no token needed (Supabase RAG with Permissions)
+-- Migration: 20260824000004_multitenancy_and_user_scoped_ingestion.sql
+-- Integrates with supabase-multitenancy:
+-- 1. Adds tenant_id & scope_id to documents and ingestion_runs
+-- 2. Grants INSERT, UPDATE, DELETE on documents, sections, chunks to authenticated
+-- 3. Implements can_read_document() and can_write_document() RLS helpers
+-- 4. Enforces category isolation (KB token vs User JWT)
+-- 5. Upgrades search RPCs with tenant_id, scope_id, include_global, allowed_categories
 -- ============================================================================
 
--- Helper function: Hash Access Token (SHA-256)
-CREATE OR REPLACE FUNCTION knowledgebase.hash_access_token(p_token TEXT)
-RETURNS TEXT
-LANGUAGE sql
-IMMUTABLE
-AS $$
-    SELECT encode(sha256(p_token::bytea), 'hex');
-$$;
+-- 1. Schema Alterations
+ALTER TABLE knowledgebase.documents
+    ADD COLUMN IF NOT EXISTS tenant_id UUID,
+    ADD COLUMN IF NOT EXISTS scope_id UUID;
 
--- Security Assertion Function: Validates Token & Audit Trail
--- If p_kb_token is null/empty but auth.uid() exists -> RLS mode, no token check.
-CREATE OR REPLACE FUNCTION knowledgebase.assert_retrieval_access(p_kb_token TEXT)
-RETURNS UUID
+CREATE INDEX IF NOT EXISTS idx_kb_documents_tenant_scope
+    ON knowledgebase.documents(tenant_id, scope_id);
+
+ALTER TABLE knowledgebase.ingestion_runs
+    ADD COLUMN IF NOT EXISTS tenant_id UUID,
+    ADD COLUMN IF NOT EXISTS user_id UUID DEFAULT auth.uid();
+
+CREATE INDEX IF NOT EXISTS idx_kb_ingestion_tenant_user
+    ON knowledgebase.ingestion_runs(tenant_id, user_id);
+
+-- Optional foreign key references if multitenancy schema is installed
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'multitenancy' AND table_name = 'tenants'
+    ) THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE constraint_name = 'fk_kb_documents_tenant'
+              AND table_schema = 'knowledgebase'
+              AND table_name = 'documents'
+        ) THEN
+            ALTER TABLE knowledgebase.documents
+                ADD CONSTRAINT fk_kb_documents_tenant
+                FOREIGN KEY (tenant_id) REFERENCES multitenancy.tenants(id) ON DELETE CASCADE;
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE constraint_name = 'fk_kb_ingestion_tenant'
+              AND table_schema = 'knowledgebase'
+              AND table_name = 'ingestion_runs'
+        ) THEN
+            ALTER TABLE knowledgebase.ingestion_runs
+                ADD CONSTRAINT fk_kb_ingestion_tenant
+                FOREIGN KEY (tenant_id) REFERENCES multitenancy.tenants(id) ON DELETE CASCADE;
+        END IF;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'multitenancy' AND table_name = 'scopes'
+    ) THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE constraint_name = 'fk_kb_documents_scope'
+              AND table_schema = 'knowledgebase'
+              AND table_name = 'documents'
+        ) THEN
+            ALTER TABLE knowledgebase.documents
+                ADD CONSTRAINT fk_kb_documents_scope
+                FOREIGN KEY (tenant_id, scope_id) REFERENCES multitenancy.scopes(tenant_id, id) ON DELETE RESTRICT;
+        END IF;
+    END IF;
+END $$;
+
+-- 2. Grants for authenticated (enables User-Scoped Ingestion via RLS)
+GRANT SELECT, INSERT, UPDATE, DELETE ON knowledgebase.documents TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON knowledgebase.document_sections TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON knowledgebase.chunks TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON knowledgebase.document_facets TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON knowledgebase.ingestion_runs TO authenticated;
+
+-- 3. RLS Security Helper Functions
+CREATE OR REPLACE FUNCTION knowledgebase.can_read_document(p_doc_id UUID)
+RETURNS BOOLEAN
 LANGUAGE plpgsql
+STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
 DECLARE
-    v_access_token_id UUID;
+    v_doc RECORD;
     v_role TEXT;
+    v_user_id UUID;
+    v_has_access BOOLEAN;
 BEGIN
-    v_role := COALESCE(current_setting('request.jwt.claim.role', true), 'service_role');
-
-    -- RLS mode: no token, but authenticated user via JWT -> skip token check
-    -- Caller relies on RLS policies (documents.owner_id = auth.uid())
-    IF (p_kb_token IS NULL OR btrim(p_kb_token) = '') AND auth.uid() IS NOT NULL THEN
-        RETURN NULL; -- signal RLS path
+    v_role := COALESCE(current_setting('request.jwt.claim.role', true), 'anon');
+    IF v_role = 'service_role' THEN
+        RETURN TRUE;
     END IF;
 
-    IF p_kb_token IS NULL OR btrim(p_kb_token) = '' THEN
-        INSERT INTO knowledgebase.access_token_audit (access_token_id, event_type, user_id, metadata)
-        VALUES (
-            NULL,
-            'failed_validation',
-            auth.uid(),
-            jsonb_build_object(
-                'reason', 'missing_token',
-                'actor_role', v_role
+    v_user_id := auth.uid();
+
+    SELECT id, tenant_id, scope_id, owner_id, top_level_category
+    INTO v_doc
+    FROM knowledgebase.documents
+    WHERE id = p_doc_id;
+
+    IF NOT FOUND THEN
+        RETURN FALSE;
+    END IF;
+
+    -- System Category Isolation:
+    -- System documents are restricted to service_role, explicit system claim, or RBAC permission.
+    IF v_doc.top_level_category = 'system' THEN
+        IF (auth.jwt() -> 'app_metadata' ->> 'is_system_agent')::boolean IS TRUE THEN
+            RETURN TRUE;
+        END IF;
+        IF to_regproc('api.has_permission') IS NOT NULL AND v_doc.tenant_id IS NOT NULL THEN
+            BEGIN
+                EXECUTE 'SELECT api.has_permission($1, $2)'
+                INTO v_has_access
+                USING v_doc.tenant_id, 'knowledgebase.system.read';
+                IF v_has_access IS TRUE THEN
+                    RETURN TRUE;
+                END IF;
+            EXCEPTION WHEN OTHERS THEN
+                NULL;
+            END;
+        END IF;
+        RETURN FALSE;
+    END IF;
+
+    -- Global Scope (tenant_id IS NULL):
+    -- Readable by authenticated users if public (owner_id IS NULL) or owned by current user or shared.
+    IF v_doc.tenant_id IS NULL THEN
+        RETURN (
+            v_doc.owner_id IS NULL
+            OR v_doc.owner_id = v_user_id
+            OR EXISTS (
+                SELECT 1 FROM knowledgebase.document_owners do2
+                WHERE do2.document_id = v_doc.id AND do2.owner_id = v_user_id
             )
         );
-        RAISE EXCEPTION 'Knowledgebase token is required (or authenticate via Supabase Auth for RLS)';
     END IF;
 
-    SELECT id
-    INTO v_access_token_id
-    FROM knowledgebase.access_tokens
-    WHERE token_hash = knowledgebase.hash_access_token(p_kb_token)
-      AND is_active = TRUE
-      AND (expires_at IS NULL OR expires_at > NOW())
-    LIMIT 1;
+    -- Tenant Scope:
+    IF to_regproc('api.access_level') IS NOT NULL THEN
+        BEGIN
+            EXECUTE 'SELECT api.access_level($1, $2, ARRAY[$3])'
+            INTO v_role
+            USING v_doc.tenant_id, 'knowledgebase.read', v_doc.scope_id;
 
-    IF v_access_token_id IS NULL THEN
-        INSERT INTO knowledgebase.access_token_audit (access_token_id, event_type, user_id, metadata)
-        VALUES (
-            NULL,
-            'failed_validation',
-            auth.uid(),
-            jsonb_build_object(
-                'reason', 'invalid_token',
-                'actor_role', v_role
-            )
-        );
-        RAISE EXCEPTION 'Invalid knowledgebase token';
+            IF v_role = 'all' THEN
+                RETURN TRUE;
+            ELSIF v_role = 'own' THEN
+                RETURN (v_doc.owner_id = v_user_id);
+            ELSE
+                RETURN FALSE;
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END;
     END IF;
 
-    UPDATE knowledgebase.access_tokens
-    SET last_used_at = NOW(), updated_at = NOW()
-    WHERE id = v_access_token_id;
-
-    INSERT INTO knowledgebase.access_token_audit (access_token_id, event_type, user_id, metadata)
-    VALUES (
-        v_access_token_id,
-        'used',
-        auth.uid(),
-        jsonb_build_object(
-            'actor_role', v_role
+    -- Fallback when supabase-multitenancy is not installed
+    RETURN (
+        v_doc.owner_id IS NULL
+        OR v_doc.owner_id = v_user_id
+        OR EXISTS (
+            SELECT 1 FROM knowledgebase.document_owners do2
+            WHERE do2.document_id = v_doc.id AND do2.owner_id = v_user_id
         )
     );
-
-    RETURN v_access_token_id;
 END;
 $$;
 
--- Helper: check if request is RLS-authenticated (auth.uid() exists) vs token
-CREATE OR REPLACE FUNCTION knowledgebase.is_rls_authenticated()
+CREATE OR REPLACE FUNCTION knowledgebase.can_write_document(p_doc_id UUID)
 RETURNS BOOLEAN
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions, knowledgebase
 AS $$
-    SELECT auth.uid() IS NOT NULL;
+DECLARE
+    v_doc RECORD;
+    v_role TEXT;
+    v_user_id UUID;
+    v_level TEXT;
+BEGIN
+    v_role := COALESCE(current_setting('request.jwt.claim.role', true), 'anon');
+    IF v_role = 'service_role' THEN
+        RETURN TRUE;
+    END IF;
+
+    v_user_id := auth.uid();
+    IF v_user_id IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    SELECT id, tenant_id, scope_id, owner_id, top_level_category
+    INTO v_doc
+    FROM knowledgebase.documents
+    WHERE id = p_doc_id;
+
+    IF NOT FOUND THEN
+        RETURN FALSE;
+    END IF;
+
+    -- Regular users cannot modify system category or global documents
+    IF v_doc.top_level_category = 'system' OR v_doc.tenant_id IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    -- Tenant Scope with supabase-multitenancy
+    IF to_regproc('api.access_level') IS NOT NULL THEN
+        BEGIN
+            EXECUTE 'SELECT api.access_level($1, $2, ARRAY[$3])'
+            INTO v_level
+            USING v_doc.tenant_id, 'knowledgebase.ingest', v_doc.scope_id;
+
+            IF v_level = 'all' THEN
+                RETURN TRUE;
+            ELSIF v_level = 'own' THEN
+                RETURN (v_doc.owner_id = v_user_id);
+            ELSE
+                RETURN FALSE;
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END;
+    END IF;
+
+    -- Fallback when supabase-multitenancy is not installed
+    RETURN (
+        v_doc.owner_id = v_user_id
+        OR EXISTS (
+            SELECT 1 FROM knowledgebase.document_owners do2
+            WHERE do2.document_id = v_doc.id AND do2.owner_id = v_user_id
+        )
+    );
+END;
 $$;
 
--- Drop obsolete function overloads to ensure clean migration
+CREATE OR REPLACE FUNCTION knowledgebase.can_insert_document(
+    p_tenant_id UUID,
+    p_scope_id UUID,
+    p_owner_id UUID,
+    p_top_level_category TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions, knowledgebase
+AS $$
+DECLARE
+    v_role TEXT;
+    v_user_id UUID;
+    v_level TEXT;
+BEGIN
+    v_role := COALESCE(current_setting('request.jwt.claim.role', true), 'anon');
+    IF v_role = 'service_role' THEN
+        RETURN TRUE;
+    END IF;
+
+    IF p_top_level_category = 'system' THEN
+        RETURN FALSE;
+    END IF;
+
+    v_user_id := auth.uid();
+    IF v_user_id IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    IF p_tenant_id IS NOT NULL THEN
+        IF to_regproc('api.access_level') IS NOT NULL THEN
+            BEGIN
+                EXECUTE 'SELECT api.access_level($1, $2, ARRAY[$3])'
+                INTO v_level
+                USING p_tenant_id, 'knowledgebase.ingest', p_scope_id;
+
+                IF v_level = 'all' THEN
+                    RETURN TRUE;
+                ELSIF v_level = 'own' THEN
+                    RETURN (p_owner_id = v_user_id OR p_owner_id IS NULL);
+                ELSE
+                    RETURN FALSE;
+                END IF;
+            EXCEPTION WHEN OTHERS THEN
+                NULL;
+            END;
+        END IF;
+        RETURN (p_owner_id = v_user_id OR p_owner_id IS NULL);
+    ELSE
+        RETURN (p_owner_id = v_user_id);
+    END IF;
+END;
+$$;
+
+-- 4. RLS Policies
+
+-- Documents Policies
+DROP POLICY IF EXISTS "Users can query their own documents" ON knowledgebase.documents;
+DROP POLICY IF EXISTS "documents_select_scoped" ON knowledgebase.documents;
+CREATE POLICY "documents_select_scoped"
+ON knowledgebase.documents FOR SELECT TO authenticated USING (
+    knowledgebase.can_read_document(id)
+);
+
+DROP POLICY IF EXISTS "Users can insert their own documents" ON knowledgebase.documents;
+DROP POLICY IF EXISTS "documents_insert_scoped" ON knowledgebase.documents;
+CREATE POLICY "documents_insert_scoped"
+ON knowledgebase.documents FOR INSERT TO authenticated WITH CHECK (
+    knowledgebase.can_insert_document(tenant_id, scope_id, owner_id, top_level_category)
+);
+
+DROP POLICY IF EXISTS "Users can update their own documents" ON knowledgebase.documents;
+DROP POLICY IF EXISTS "documents_update_scoped" ON knowledgebase.documents;
+CREATE POLICY "documents_update_scoped"
+ON knowledgebase.documents FOR UPDATE TO authenticated
+USING (knowledgebase.can_write_document(id))
+WITH CHECK (knowledgebase.can_write_document(id));
+
+DROP POLICY IF EXISTS "Users can delete their own documents" ON knowledgebase.documents;
+DROP POLICY IF EXISTS "documents_delete_scoped" ON knowledgebase.documents;
+CREATE POLICY "documents_delete_scoped"
+ON knowledgebase.documents FOR DELETE TO authenticated
+USING (knowledgebase.can_write_document(id));
+
+-- Sections Policies
+DROP POLICY IF EXISTS "Users can query their own document sections" ON knowledgebase.document_sections;
+DROP POLICY IF EXISTS "document_sections_select_scoped" ON knowledgebase.document_sections;
+CREATE POLICY "document_sections_select_scoped"
+ON knowledgebase.document_sections FOR SELECT TO authenticated
+USING (knowledgebase.can_read_document(document_id));
+
+DROP POLICY IF EXISTS "document_sections_insert_scoped" ON knowledgebase.document_sections;
+CREATE POLICY "document_sections_insert_scoped"
+ON knowledgebase.document_sections FOR INSERT TO authenticated
+WITH CHECK (knowledgebase.can_write_document(document_id));
+
+DROP POLICY IF EXISTS "document_sections_update_scoped" ON knowledgebase.document_sections;
+CREATE POLICY "document_sections_update_scoped"
+ON knowledgebase.document_sections FOR UPDATE TO authenticated
+USING (knowledgebase.can_write_document(document_id))
+WITH CHECK (knowledgebase.can_write_document(document_id));
+
+DROP POLICY IF EXISTS "document_sections_delete_scoped" ON knowledgebase.document_sections;
+CREATE POLICY "document_sections_delete_scoped"
+ON knowledgebase.document_sections FOR DELETE TO authenticated
+USING (knowledgebase.can_write_document(document_id));
+
+-- Chunks Policies
+DROP POLICY IF EXISTS "Users can query their own chunks" ON knowledgebase.chunks;
+DROP POLICY IF EXISTS "chunks_select_scoped" ON knowledgebase.chunks;
+CREATE POLICY "chunks_select_scoped"
+ON knowledgebase.chunks FOR SELECT TO authenticated
+USING (knowledgebase.can_read_document(document_id));
+
+DROP POLICY IF EXISTS "chunks_insert_scoped" ON knowledgebase.chunks;
+CREATE POLICY "chunks_insert_scoped"
+ON knowledgebase.chunks FOR INSERT TO authenticated
+WITH CHECK (knowledgebase.can_write_document(document_id));
+
+DROP POLICY IF EXISTS "chunks_update_scoped" ON knowledgebase.chunks;
+CREATE POLICY "chunks_update_scoped"
+ON knowledgebase.chunks FOR UPDATE TO authenticated
+USING (knowledgebase.can_write_document(document_id))
+WITH CHECK (knowledgebase.can_write_document(document_id));
+
+DROP POLICY IF EXISTS "chunks_delete_scoped" ON knowledgebase.chunks;
+CREATE POLICY "chunks_delete_scoped"
+ON knowledgebase.chunks FOR DELETE TO authenticated
+USING (knowledgebase.can_write_document(document_id));
+
+-- Document Facets Policies
+DROP POLICY IF EXISTS "Users can query their own document facets" ON knowledgebase.document_facets;
+DROP POLICY IF EXISTS "document_facets_select_scoped" ON knowledgebase.document_facets;
+CREATE POLICY "document_facets_select_scoped"
+ON knowledgebase.document_facets FOR SELECT TO authenticated
+USING (knowledgebase.can_read_document(document_id));
+
+DROP POLICY IF EXISTS "document_facets_insert_scoped" ON knowledgebase.document_facets;
+CREATE POLICY "document_facets_insert_scoped"
+ON knowledgebase.document_facets FOR INSERT TO authenticated
+WITH CHECK (knowledgebase.can_write_document(document_id));
+
+DROP POLICY IF EXISTS "document_facets_update_scoped" ON knowledgebase.document_facets;
+CREATE POLICY "document_facets_update_scoped"
+ON knowledgebase.document_facets FOR UPDATE TO authenticated
+USING (knowledgebase.can_write_document(document_id))
+WITH CHECK (knowledgebase.can_write_document(document_id));
+
+DROP POLICY IF EXISTS "document_facets_delete_scoped" ON knowledgebase.document_facets;
+CREATE POLICY "document_facets_delete_scoped"
+ON knowledgebase.document_facets FOR DELETE TO authenticated
+USING (knowledgebase.can_write_document(document_id));
+
+-- Ingestion Runs Policy (Authenticated Users can manage their own runs)
+DROP POLICY IF EXISTS "ingestion_runs_scoped" ON knowledgebase.ingestion_runs;
+CREATE POLICY "ingestion_runs_scoped"
+ON knowledgebase.ingestion_runs FOR ALL TO authenticated
+USING (user_id = auth.uid() OR user_id IS NULL)
+WITH CHECK (user_id = auth.uid() OR user_id IS NULL);
+
+-- 5. Upgraded Search RPCs
+-- Drop obsolete function overloads from migrations 02 and 03
 DROP FUNCTION IF EXISTS knowledgebase.match_chunks_by_embedding(text, vector, integer, text[], double precision, integer);
 DROP FUNCTION IF EXISTS knowledgebase.match_chunks_by_embedding_rls(vector, integer, text[], double precision, integer);
 DROP FUNCTION IF EXISTS knowledgebase.search_chunks_full_text(text, text, integer, text[], text);
@@ -106,9 +410,6 @@ DROP FUNCTION IF EXISTS knowledgebase.search_chunks_full_text_rls(text, integer,
 DROP FUNCTION IF EXISTS knowledgebase.search_chunks_hybrid(text, text, vector, integer, text[], integer, integer, double precision, double precision, text, double precision, integer);
 DROP FUNCTION IF EXISTS knowledgebase.search_chunks_hybrid_rls(text, vector, integer, text[], integer, integer, double precision, double precision, text, double precision, integer);
 
--- ============================================================================
--- 1. Vector Search RPC — supports token OR RLS
--- ============================================================================
 CREATE OR REPLACE FUNCTION knowledgebase.match_chunks_by_embedding(
     p_kb_token TEXT,
     p_query_embedding VECTOR,
@@ -150,8 +451,8 @@ BEGIN
     v_is_rls := (v_token_id IS NULL AND knowledgebase.is_rls_authenticated());
 
     IF v_token_id IS NOT NULL THEN
-        SELECT tenant_id, metadata INTO v_tenant_id, v_token_meta
-        FROM knowledgebase.access_tokens WHERE id = v_token_id;
+        SELECT t.tenant_id, t.metadata INTO v_tenant_id, v_token_meta
+        FROM knowledgebase.access_tokens t WHERE t.id = v_token_id;
 
         IF v_token_meta ? 'allowed_categories' THEN
             SELECT ARRAY(SELECT jsonb_array_elements_text(v_token_meta -> 'allowed_categories'))
@@ -189,22 +490,28 @@ BEGIN
           AND (p_min_vector_similarity IS NULL OR (1 - (c.embedding <=> p_query_embedding)) >= p_min_vector_similarity)
           -- Category isolation
           AND (
+            -- 1. KB Token caller
             (v_token_id IS NOT NULL AND (
                 v_token_categories IS NULL OR d.top_level_category = ANY(v_token_categories)
             ))
+            -- 2. User JWT / RLS caller (exclude system unless explicitly allowed)
             OR (v_is_rls AND (
                 (p_allowed_categories IS NOT NULL AND d.top_level_category = ANY(p_allowed_categories))
                 OR (d.top_level_category IS DISTINCT FROM 'system')
             ))
+            -- 3. Service role caller without token
             OR (v_token_id IS NULL AND NOT v_is_rls)
           )
           -- Tenant / Scope isolation
           AND (
+            -- Service role full access
             (v_token_id IS NULL AND NOT v_is_rls)
+            -- Scoped token
             OR (v_token_id IS NOT NULL AND (
                 (v_tenant_id IS NULL AND (p_tenant_id IS NULL OR d.tenant_id = p_tenant_id))
                 OR (v_tenant_id IS NOT NULL AND d.tenant_id = v_tenant_id)
             ))
+            -- RLS User JWT
             OR (v_is_rls AND (
                 (p_include_global AND d.tenant_id IS NULL AND knowledgebase.can_read_document(d.id))
                 OR (d.tenant_id IS NOT NULL
@@ -373,8 +680,8 @@ BEGIN
     v_is_rls := (v_token_id IS NULL AND knowledgebase.is_rls_authenticated());
 
     IF v_token_id IS NOT NULL THEN
-        SELECT tenant_id, metadata INTO v_tenant_id, v_token_meta
-        FROM knowledgebase.access_tokens WHERE id = v_token_id;
+        SELECT t.tenant_id, t.metadata INTO v_tenant_id, v_token_meta
+        FROM knowledgebase.access_tokens t WHERE t.id = v_token_id;
 
         IF v_token_meta ? 'allowed_categories' THEN
             SELECT ARRAY(SELECT jsonb_array_elements_text(v_token_meta -> 'allowed_categories'))
@@ -567,9 +874,7 @@ BEGIN
 END;
 $$;
 
--- ============================================================================
--- 3. Hybrid Search RPC (Two-Stage Vector + FTS Candidates with RRF Fusion)
--- ============================================================================
+-- Hybrid Search RPC (Two-Stage Vector + FTS Candidates with RRF Fusion)
 CREATE OR REPLACE FUNCTION knowledgebase.search_chunks_hybrid(
     p_kb_token TEXT,
     p_query TEXT,
@@ -623,8 +928,8 @@ BEGIN
     v_is_rls := (v_token_id IS NULL AND knowledgebase.is_rls_authenticated());
 
     IF v_token_id IS NOT NULL THEN
-        SELECT tenant_id, metadata INTO v_tenant_id, v_token_meta
-        FROM knowledgebase.access_tokens WHERE id = v_token_id;
+        SELECT t.tenant_id, t.metadata INTO v_tenant_id, v_token_meta
+        FROM knowledgebase.access_tokens t WHERE t.id = v_token_id;
 
         IF v_token_meta ? 'allowed_categories' THEN
             SELECT ARRAY(SELECT jsonb_array_elements_text(v_token_meta -> 'allowed_categories'))
@@ -972,87 +1277,10 @@ BEGIN
 END;
 $$;
 
--- ============================================================================
--- 4. Navigation Facets RPC — token OR RLS
--- ============================================================================
-CREATE OR REPLACE FUNCTION knowledgebase.get_navigation_facets(
-    p_kb_token TEXT,
-    p_facet_type TEXT DEFAULT NULL
-)
-RETURNS TABLE (
-    facet_id UUID,
-    facet_type TEXT,
-    facet_key TEXT,
-    label TEXT,
-    parent_facet_id UUID,
-    sort_order INT,
-    document_count BIGINT
-)
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, public, extensions, knowledgebase
-AS $$
-DECLARE
-    v_token_id UUID;
-    v_tenant_id UUID;
-BEGIN
-    v_token_id := knowledgebase.assert_retrieval_access(p_kb_token);
-    IF v_token_id IS NOT NULL THEN
-        SELECT tenant_id INTO v_tenant_id FROM knowledgebase.access_tokens WHERE id = v_token_id;
-    END IF;
-    RETURN QUERY
-    SELECT
-        f.id,
-        f.facet_type,
-        f.facet_key,
-        f.label,
-        f.parent_facet_id,
-        f.sort_order,
-        COUNT(df.document_id) AS document_count
-    FROM knowledgebase.facets f
-    LEFT JOIN knowledgebase.document_facets df ON df.facet_id = f.id
-    LEFT JOIN knowledgebase.documents d ON d.id = df.document_id
-    WHERE (p_facet_type IS NULL OR f.facet_type = p_facet_type)
-      AND (v_tenant_id IS NULL OR d.owner_id = v_tenant_id)
-    GROUP BY f.id, f.facet_type, f.facet_key, f.label, f.parent_facet_id, f.sort_order
-    ORDER BY f.facet_type ASC, f.sort_order ASC, f.label ASC;
-END;
-$$;
+-- Ensure chunks search vector trigger fires on all updates including cascaded updated_at
+DROP TRIGGER IF EXISTS trigger_kb_chunks_search_vector ON knowledgebase.chunks;
+CREATE TRIGGER trigger_kb_chunks_search_vector
+BEFORE INSERT OR UPDATE
+ON knowledgebase.chunks
+FOR EACH ROW EXECUTE FUNCTION knowledgebase.chunks_search_vector_trigger();
 
-CREATE OR REPLACE FUNCTION knowledgebase.get_navigation_facets_rls(
-    p_facet_type TEXT DEFAULT NULL
-)
-RETURNS TABLE (
-    facet_id UUID,
-    facet_type TEXT,
-    facet_key TEXT,
-    label TEXT,
-    parent_facet_id UUID,
-    sort_order INT,
-    document_count BIGINT
-)
-LANGUAGE plpgsql
-SECURITY INVOKER
-SET search_path = pg_catalog, public, extensions, knowledgebase
-AS $$
-BEGIN
-    RETURN QUERY
-    SELECT f.id, f.facet_type, f.facet_key, f.label, f.parent_facet_id, f.sort_order, COUNT(df.document_id)
-    FROM knowledgebase.facets f LEFT JOIN knowledgebase.document_facets df ON df.facet_id = f.id
-    WHERE p_facet_type IS NULL OR f.facet_type = p_facet_type
-    GROUP BY f.id, f.facet_type, f.facet_key, f.label, f.parent_facet_id, f.sort_order
-    ORDER BY f.facet_type ASC, f.sort_order ASC, f.label ASC;
-END;
-$$;
-
--- Grants
-REVOKE ALL ON FUNCTION knowledgebase.hash_access_token(TEXT) FROM PUBLIC;
-REVOKE ALL ON FUNCTION knowledgebase.assert_retrieval_access(TEXT) FROM PUBLIC;
-REVOKE ALL ON FUNCTION knowledgebase.is_rls_authenticated() FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION knowledgebase.hash_access_token(TEXT) TO service_role;
-GRANT EXECUTE ON FUNCTION knowledgebase.assert_retrieval_access(TEXT) TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION knowledgebase.is_rls_authenticated() TO authenticated, service_role;
-
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA knowledgebase TO authenticated, service_role;
-REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA knowledgebase FROM anon;
-GRANT EXECUTE ON FUNCTION knowledgebase.get_navigation_facets_rls(TEXT) TO anon;

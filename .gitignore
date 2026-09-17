@@ -59,3 +59,6 @@ eval/output/*
 eval/report*.json
 eval/*.log
 
+# Local model weights
+models/
+

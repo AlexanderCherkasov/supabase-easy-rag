@@ -34,6 +34,7 @@ class TokenManager:
         expires_at: str | None = None,
         metadata: dict[str, Any] | None = None,
         tenant_id: str | None = None,
+        allowed_categories: Sequence[str] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         if tenant_id is not None:
             if not str(tenant_id).strip():
@@ -46,12 +47,16 @@ class TokenManager:
         raw_token = generate_secure_token()
         token_hash = hash_token(raw_token)
 
+        token_metadata = dict(metadata or {})
+        if allowed_categories is not None:
+            token_metadata["allowed_categories"] = list(allowed_categories)
+
         payload = {
             "token_name": name,
             "token_hash": token_hash,
             "is_active": True,
             "expires_at": expires_at,
-            "metadata": metadata or {},
+            "metadata": token_metadata,
             "tenant_id": tenant_id,
         }
         response = self._table().insert(payload).execute()

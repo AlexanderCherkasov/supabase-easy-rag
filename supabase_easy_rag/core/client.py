@@ -14,6 +14,9 @@ from supabase_easy_rag.retrieval.postgrest_client import create_postgrest_client
 from supabase_easy_rag.security.tokens import TokenManager
 
 
+_UNSET = object()
+
+
 class EasyRagClient:
     """Core RAG client — no vendor branching, pure injection.
 
@@ -33,6 +36,9 @@ class EasyRagClient:
         config: EasyRagConfig | None = None,
         user_jwt: str | None = None,
         use_rls: bool | None = None,
+        tenant_id: Any = _UNSET,
+        scope_id: Any = _UNSET,
+        include_global: Any = _UNSET,
     ) -> None:
         self.config: EasyRagConfig = config or EasyRagConfig.from_env()
         self.url: str = supabase_url or self.config.supabase_url
@@ -40,6 +46,16 @@ class EasyRagClient:
         self.use_rls: bool = use_rls if use_rls is not None else self.config.use_rls
         if self.user_jwt:
             self.use_rls = True
+
+        self.tenant_id: str | None = (
+            tenant_id if tenant_id is not _UNSET else self.config.tenant_id
+        )
+        self.scope_id: str | None = (
+            scope_id if scope_id is not _UNSET else self.config.scope_id
+        )
+        self.include_global: bool = (
+            include_global if include_global is not _UNSET else self.config.include_global
+        )
 
         if self.use_rls:
             resolved_key = supabase_key or self.config.supabase_anon_key
@@ -71,6 +87,9 @@ class EasyRagClient:
                 postgrest_client=self.postgrest,
                 embedding_provider=self.provider,
                 schema_name=self.config.schema_name,
+                chunk_size=self.config.chunk_size,
+                chunk_overlap=self.config.chunk_overlap,
+                enable_chunking=self.config.enable_chunking,
             )
             if self.provider
             else None
@@ -80,8 +99,17 @@ class EasyRagClient:
             schema_name=self.config.schema_name,
         )
 
-    def for_user(self, user_jwt: str) -> EasyRagClient:
+    def for_user(
+        self,
+        user_jwt: str,
+        tenant_id: Any = _UNSET,
+        scope_id: Any = _UNSET,
+        include_global: Any = _UNSET,
+    ) -> EasyRagClient:
         anon_key: str = self.config.supabase_anon_key or self.key
+        resolved_tenant = tenant_id if tenant_id is not _UNSET else self.tenant_id
+        resolved_scope = scope_id if scope_id is not _UNSET else self.scope_id
+        resolved_global = include_global if include_global is not _UNSET else self.include_global
         return EasyRagClient(
             supabase_url=self.url,
             supabase_key=anon_key,
@@ -89,6 +117,9 @@ class EasyRagClient:
             config=self.config,
             user_jwt=user_jwt,
             use_rls=True,
+            tenant_id=resolved_tenant,
+            scope_id=resolved_scope,
+            include_global=resolved_global,
         )
 
     def search_hybrid(
@@ -105,6 +136,10 @@ class EasyRagClient:
         min_vector_similarity: float | None = None,
         use_rls: bool | None = None,
         expand_context: str | None = None,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
+        include_global: bool | None = None,
+        allowed_categories: Sequence[str] | None = None,
     ) -> list[SearchResult]:
         resolved_cand = candidate_count if candidate_count is not None else self.config.candidate_count
         resolved_rrf_k = rrf_k if rrf_k is not None else self.config.rrf_k
@@ -112,6 +147,9 @@ class EasyRagClient:
         resolved_t_weight = text_weight if text_weight is not None else self.config.text_weight
         resolved_fts_cfg = fts_config if fts_config is not None else self.config.fts_config
         resolved_min_sim = min_vector_similarity if min_vector_similarity is not None else self.config.min_vector_similarity
+        resolved_tenant = tenant_id if tenant_id is not None else self.tenant_id
+        resolved_scope = scope_id if scope_id is not None else self.scope_id
+        resolved_global = include_global if include_global is not None else self.include_global
 
         if self.use_rls or use_rls or (kb_token is None and not self.config.knowledgebase_access_token):
             return self.retrieval.search_hybrid(
@@ -127,6 +165,10 @@ class EasyRagClient:
                 min_vector_similarity=resolved_min_sim,
                 use_rls=True,
                 expand_context=expand_context,
+                tenant_id=resolved_tenant,
+                scope_id=resolved_scope,
+                include_global=resolved_global,
+                allowed_categories=allowed_categories,
             )
         token: str = kb_token or self.config.knowledgebase_access_token
         return self.retrieval.search_hybrid(
@@ -142,6 +184,10 @@ class EasyRagClient:
             min_vector_similarity=resolved_min_sim,
             use_rls=False,
             expand_context=expand_context,
+            tenant_id=resolved_tenant,
+            scope_id=resolved_scope,
+            include_global=resolved_global,
+            allowed_categories=allowed_categories,
         )
 
     def search_vector(
@@ -153,8 +199,16 @@ class EasyRagClient:
         min_vector_similarity: float | None = None,
         use_rls: bool | None = None,
         expand_context: str | None = None,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
+        include_global: bool | None = None,
+        allowed_categories: Sequence[str] | None = None,
     ) -> list[SearchResult]:
         resolved_min_sim = min_vector_similarity if min_vector_similarity is not None else self.config.min_vector_similarity
+        resolved_tenant = tenant_id if tenant_id is not None else self.tenant_id
+        resolved_scope = scope_id if scope_id is not None else self.scope_id
+        resolved_global = include_global if include_global is not None else self.include_global
+
         if self.use_rls or use_rls or (kb_token is None and not self.config.knowledgebase_access_token):
             return self.retrieval.search_vector(
                 query=query,
@@ -164,6 +218,10 @@ class EasyRagClient:
                 min_vector_similarity=resolved_min_sim,
                 use_rls=True,
                 expand_context=expand_context,
+                tenant_id=resolved_tenant,
+                scope_id=resolved_scope,
+                include_global=resolved_global,
+                allowed_categories=allowed_categories,
             )
         token = kb_token or self.config.knowledgebase_access_token
         return self.retrieval.search_vector(
@@ -174,6 +232,10 @@ class EasyRagClient:
             min_vector_similarity=resolved_min_sim,
             use_rls=False,
             expand_context=expand_context,
+            tenant_id=resolved_tenant,
+            scope_id=resolved_scope,
+            include_global=resolved_global,
+            allowed_categories=allowed_categories,
         )
 
     def search_fts(
@@ -185,8 +247,16 @@ class EasyRagClient:
         fts_config: str | None = None,
         use_rls: bool | None = None,
         expand_context: str | None = None,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
+        include_global: bool | None = None,
+        allowed_categories: Sequence[str] | None = None,
     ) -> list[SearchResult]:
         resolved_fts_cfg = fts_config if fts_config is not None else self.config.fts_config
+        resolved_tenant = tenant_id if tenant_id is not None else self.tenant_id
+        resolved_scope = scope_id if scope_id is not None else self.scope_id
+        resolved_global = include_global if include_global is not None else self.include_global
+
         if self.use_rls or use_rls or (kb_token is None and not self.config.knowledgebase_access_token):
             return self.retrieval.search_fts(
                 query=query,
@@ -196,6 +266,10 @@ class EasyRagClient:
                 fts_config=resolved_fts_cfg,
                 use_rls=True,
                 expand_context=expand_context,
+                tenant_id=resolved_tenant,
+                scope_id=resolved_scope,
+                include_global=resolved_global,
+                allowed_categories=allowed_categories,
             )
         token = kb_token or self.config.knowledgebase_access_token
         return self.retrieval.search_fts(
@@ -206,8 +280,11 @@ class EasyRagClient:
             fts_config=resolved_fts_cfg,
             use_rls=False,
             expand_context=expand_context,
+            tenant_id=resolved_tenant,
+            scope_id=resolved_scope,
+            include_global=resolved_global,
+            allowed_categories=allowed_categories,
         )
-
 
     def sync_directory(
         self,
@@ -222,9 +299,13 @@ class EasyRagClient:
         chunk_overlap: int | None = None,
         max_workers: int = 4,
         force: bool = False,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
     ) -> dict[str, Any]:
         if not self.syncer:
             raise RuntimeError("DocumentSyncer requires an explicit embedding_provider (inject via connectors)")
+        resolved_tenant = tenant_id if tenant_id is not None else self.tenant_id
+        resolved_scope = scope_id if scope_id is not None else self.scope_id
         return self.syncer.sync_directory(
             source_root=Path(source_dir),
             pattern=pattern,
@@ -237,6 +318,8 @@ class EasyRagClient:
             chunk_overlap=chunk_overlap,
             max_workers=max_workers,
             force=force,
+            tenant_id=resolved_tenant,
+            scope_id=resolved_scope,
         )
 
 
@@ -253,6 +336,9 @@ class AsyncEasyRagClient:
         config: EasyRagConfig | None = None,
         user_jwt: str | None = None,
         use_rls: bool | None = None,
+        tenant_id: Any = _UNSET,
+        scope_id: Any = _UNSET,
+        include_global: Any = _UNSET,
     ) -> None:
         from supabase_easy_rag.retrieval.engine import AsyncRetrievalEngine
         from supabase_easy_rag.retrieval.postgrest_client import create_async_postgrest_client
@@ -263,6 +349,16 @@ class AsyncEasyRagClient:
         self.use_rls: bool = use_rls if use_rls is not None else self.config.use_rls
         if self.user_jwt:
             self.use_rls = True
+
+        self.tenant_id: str | None = (
+            tenant_id if tenant_id is not _UNSET else self.config.tenant_id
+        )
+        self.scope_id: str | None = (
+            scope_id if scope_id is not _UNSET else self.config.scope_id
+        )
+        self.include_global: bool = (
+            include_global if include_global is not _UNSET else self.config.include_global
+        )
 
         if self.use_rls:
             resolved_key = supabase_key or self.config.supabase_anon_key
@@ -290,8 +386,17 @@ class AsyncEasyRagClient:
             schema_name=self.config.schema_name,
         )
 
-    def for_user(self, user_jwt: str) -> AsyncEasyRagClient:
+    def for_user(
+        self,
+        user_jwt: str,
+        tenant_id: Any = _UNSET,
+        scope_id: Any = _UNSET,
+        include_global: Any = _UNSET,
+    ) -> AsyncEasyRagClient:
         anon_key: str = self.config.supabase_anon_key or self.key
+        resolved_tenant = tenant_id if tenant_id is not _UNSET else self.tenant_id
+        resolved_scope = scope_id if scope_id is not _UNSET else self.scope_id
+        resolved_global = include_global if include_global is not _UNSET else self.include_global
         return AsyncEasyRagClient(
             supabase_url=self.url,
             supabase_key=anon_key,
@@ -299,6 +404,9 @@ class AsyncEasyRagClient:
             config=self.config,
             user_jwt=user_jwt,
             use_rls=True,
+            tenant_id=resolved_tenant,
+            scope_id=resolved_scope,
+            include_global=resolved_global,
         )
 
     async def search_hybrid(
@@ -315,6 +423,10 @@ class AsyncEasyRagClient:
         min_vector_similarity: float | None = None,
         use_rls: bool | None = None,
         expand_context: str | None = None,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
+        include_global: bool | None = None,
+        allowed_categories: Sequence[str] | None = None,
     ) -> list[SearchResult]:
         resolved_cand = candidate_count if candidate_count is not None else self.config.candidate_count
         resolved_rrf_k = rrf_k if rrf_k is not None else self.config.rrf_k
@@ -322,6 +434,9 @@ class AsyncEasyRagClient:
         resolved_t_weight = text_weight if text_weight is not None else self.config.text_weight
         resolved_fts_cfg = fts_config if fts_config is not None else self.config.fts_config
         resolved_min_sim = min_vector_similarity if min_vector_similarity is not None else self.config.min_vector_similarity
+        resolved_tenant = tenant_id if tenant_id is not None else self.tenant_id
+        resolved_scope = scope_id if scope_id is not None else self.scope_id
+        resolved_global = include_global if include_global is not None else self.include_global
 
         if self.use_rls or use_rls or (kb_token is None and not self.config.knowledgebase_access_token):
             return await self.retrieval.search_hybrid(
@@ -337,6 +452,10 @@ class AsyncEasyRagClient:
                 min_vector_similarity=resolved_min_sim,
                 use_rls=True,
                 expand_context=expand_context,
+                tenant_id=resolved_tenant,
+                scope_id=resolved_scope,
+                include_global=resolved_global,
+                allowed_categories=allowed_categories,
             )
         token: str = kb_token or self.config.knowledgebase_access_token
         return await self.retrieval.search_hybrid(
@@ -352,6 +471,10 @@ class AsyncEasyRagClient:
             min_vector_similarity=resolved_min_sim,
             use_rls=False,
             expand_context=expand_context,
+            tenant_id=resolved_tenant,
+            scope_id=resolved_scope,
+            include_global=resolved_global,
+            allowed_categories=allowed_categories,
         )
 
     async def search_vector(
@@ -363,8 +486,16 @@ class AsyncEasyRagClient:
         min_vector_similarity: float | None = None,
         use_rls: bool | None = None,
         expand_context: str | None = None,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
+        include_global: bool | None = None,
+        allowed_categories: Sequence[str] | None = None,
     ) -> list[SearchResult]:
         resolved_min_sim = min_vector_similarity if min_vector_similarity is not None else self.config.min_vector_similarity
+        resolved_tenant = tenant_id if tenant_id is not None else self.tenant_id
+        resolved_scope = scope_id if scope_id is not None else self.scope_id
+        resolved_global = include_global if include_global is not None else self.include_global
+
         if self.use_rls or use_rls or (kb_token is None and not self.config.knowledgebase_access_token):
             return await self.retrieval.search_vector(
                 query=query,
@@ -374,6 +505,10 @@ class AsyncEasyRagClient:
                 min_vector_similarity=resolved_min_sim,
                 use_rls=True,
                 expand_context=expand_context,
+                tenant_id=resolved_tenant,
+                scope_id=resolved_scope,
+                include_global=resolved_global,
+                allowed_categories=allowed_categories,
             )
         token = kb_token or self.config.knowledgebase_access_token
         return await self.retrieval.search_vector(
@@ -384,6 +519,10 @@ class AsyncEasyRagClient:
             min_vector_similarity=resolved_min_sim,
             use_rls=False,
             expand_context=expand_context,
+            tenant_id=resolved_tenant,
+            scope_id=resolved_scope,
+            include_global=resolved_global,
+            allowed_categories=allowed_categories,
         )
 
     async def search_fts(
@@ -395,8 +534,16 @@ class AsyncEasyRagClient:
         fts_config: str | None = None,
         use_rls: bool | None = None,
         expand_context: str | None = None,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
+        include_global: bool | None = None,
+        allowed_categories: Sequence[str] | None = None,
     ) -> list[SearchResult]:
         resolved_fts_cfg = fts_config if fts_config is not None else self.config.fts_config
+        resolved_tenant = tenant_id if tenant_id is not None else self.tenant_id
+        resolved_scope = scope_id if scope_id is not None else self.scope_id
+        resolved_global = include_global if include_global is not None else self.include_global
+
         if self.use_rls or use_rls or (kb_token is None and not self.config.knowledgebase_access_token):
             return await self.retrieval.search_fts(
                 query=query,
@@ -406,6 +553,10 @@ class AsyncEasyRagClient:
                 fts_config=resolved_fts_cfg,
                 use_rls=True,
                 expand_context=expand_context,
+                tenant_id=resolved_tenant,
+                scope_id=resolved_scope,
+                include_global=resolved_global,
+                allowed_categories=allowed_categories,
             )
         token = kb_token or self.config.knowledgebase_access_token
         return await self.retrieval.search_fts(
@@ -416,6 +567,10 @@ class AsyncEasyRagClient:
             fts_config=resolved_fts_cfg,
             use_rls=False,
             expand_context=expand_context,
+            tenant_id=resolved_tenant,
+            scope_id=resolved_scope,
+            include_global=resolved_global,
+            allowed_categories=allowed_categories,
         )
 
 

@@ -9,5 +9,13 @@ Concrete connectors: supabase_easy_rag.providers.azure / openai — each explici
 from supabase_easy_rag.providers.base import BaseEmbeddingProvider
 from supabase_easy_rag.providers.chat_base import BaseChatProvider
 from supabase_easy_rag.providers.local_provider import CustomChatProvider, CustomEmbeddingProvider
+from supabase_easy_rag.providers.mlx_provider import MlxQwenEmbeddingProvider
 
-__all__ = ["BaseChatProvider", "BaseEmbeddingProvider", "CustomChatProvider", "CustomEmbeddingProvider"]
+__all__ = [
+    "BaseChatProvider",
+    "BaseEmbeddingProvider",
+    "CustomChatProvider",
+    "CustomEmbeddingProvider",
+    "MlxQwenEmbeddingProvider",
+]
+

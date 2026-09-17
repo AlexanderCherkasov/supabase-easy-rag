@@ -214,5 +214,12 @@ def list_tokens():
     console.print(table)
 
 
+@app.command("bench-qwen")
+def bench_qwen():
+    """Run full benchmark for Qwen3-Embedding-0.6B (MLX INT8+BF16) on local Supabase."""
+    from eval.qwen_mlx_local_eval import run_qwen_benchmark
+    run_qwen_benchmark()
+
+
 if __name__ == "__main__":
     app()

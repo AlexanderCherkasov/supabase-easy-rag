@@ -140,6 +140,10 @@ class RetrievalEngine:
         min_vector_similarity: float | None = None,
         use_rls: bool = False,
         expand_context: str | None = None,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
+        include_global: bool | None = None,
+        allowed_categories: Sequence[str] | None = None,
     ) -> list[SearchResult]:
         if not self.provider:
             raise EasyRagError("Embedding provider is required for vector search")
@@ -150,6 +154,15 @@ class RetrievalEngine:
             "p_facet_keys": list(facet_keys) if facet_keys else None,
             "p_min_vector_similarity": min_vector_similarity,
         }
+        if tenant_id is not None:
+            params["p_tenant_id"] = tenant_id
+        if scope_id is not None:
+            params["p_scope_id"] = scope_id
+        if include_global is not None:
+            params["p_include_global"] = include_global
+        if allowed_categories is not None:
+            params["p_allowed_categories"] = list(allowed_categories)
+
         # RLS mode: call _rls variant without token (auth.uid() enforced)
         if use_rls or kb_token is None:
             data = self._rpc("match_chunks_by_embedding_rls", params)
@@ -170,6 +183,10 @@ class RetrievalEngine:
         fts_config: str = "english",
         use_rls: bool = False,
         expand_context: str | None = None,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
+        include_global: bool | None = None,
+        allowed_categories: Sequence[str] | None = None,
     ) -> list[SearchResult]:
         params: dict[str, Any] = {
             "p_query": query,
@@ -177,6 +194,15 @@ class RetrievalEngine:
             "p_facet_keys": list(facet_keys) if facet_keys else None,
             "p_fts_config": fts_config,
         }
+        if tenant_id is not None:
+            params["p_tenant_id"] = tenant_id
+        if scope_id is not None:
+            params["p_scope_id"] = scope_id
+        if include_global is not None:
+            params["p_include_global"] = include_global
+        if allowed_categories is not None:
+            params["p_allowed_categories"] = list(allowed_categories)
+
         if use_rls or kb_token is None:
             data = self._rpc("search_chunks_full_text_rls", params)
         else:
@@ -201,6 +227,10 @@ class RetrievalEngine:
         min_vector_similarity: float | None = None,
         use_rls: bool = False,
         expand_context: str | None = None,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
+        include_global: bool | None = None,
+        allowed_categories: Sequence[str] | None = None,
     ) -> list[SearchResult]:
         query_vector: list[float] | None = None
         if self.provider:
@@ -223,6 +253,14 @@ class RetrievalEngine:
             "p_fts_config": fts_config,
             "p_min_vector_similarity": min_vector_similarity,
         }
+        if tenant_id is not None:
+            params["p_tenant_id"] = tenant_id
+        if scope_id is not None:
+            params["p_scope_id"] = scope_id
+        if include_global is not None:
+            params["p_include_global"] = include_global
+        if allowed_categories is not None:
+            params["p_allowed_categories"] = list(allowed_categories)
 
         if use_rls or kb_token is None:
             data = self._rpc("search_chunks_hybrid_rls", params)
@@ -351,6 +389,10 @@ class AsyncRetrievalEngine:
         min_vector_similarity: float | None = None,
         use_rls: bool = False,
         expand_context: str | None = None,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
+        include_global: bool | None = None,
+        allowed_categories: Sequence[str] | None = None,
     ) -> list[SearchResult]:
         if not self.provider:
             raise EasyRagError("Embedding provider is required for vector search")
@@ -361,6 +403,15 @@ class AsyncRetrievalEngine:
             "p_facet_keys": list(facet_keys) if facet_keys else None,
             "p_min_vector_similarity": min_vector_similarity,
         }
+        if tenant_id is not None:
+            params["p_tenant_id"] = tenant_id
+        if scope_id is not None:
+            params["p_scope_id"] = scope_id
+        if include_global is not None:
+            params["p_include_global"] = include_global
+        if allowed_categories is not None:
+            params["p_allowed_categories"] = list(allowed_categories)
+
         if use_rls or kb_token is None:
             data = await self._rpc("match_chunks_by_embedding_rls", params)
         else:
@@ -380,6 +431,10 @@ class AsyncRetrievalEngine:
         fts_config: str = "english",
         use_rls: bool = False,
         expand_context: str | None = None,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
+        include_global: bool | None = None,
+        allowed_categories: Sequence[str] | None = None,
     ) -> list[SearchResult]:
         params: dict[str, Any] = {
             "p_query": query,
@@ -387,6 +442,15 @@ class AsyncRetrievalEngine:
             "p_facet_keys": list(facet_keys) if facet_keys else None,
             "p_fts_config": fts_config,
         }
+        if tenant_id is not None:
+            params["p_tenant_id"] = tenant_id
+        if scope_id is not None:
+            params["p_scope_id"] = scope_id
+        if include_global is not None:
+            params["p_include_global"] = include_global
+        if allowed_categories is not None:
+            params["p_allowed_categories"] = list(allowed_categories)
+
         if use_rls or kb_token is None:
             data = await self._rpc("search_chunks_full_text_rls", params)
         else:
@@ -411,6 +475,10 @@ class AsyncRetrievalEngine:
         min_vector_similarity: float | None = None,
         use_rls: bool = False,
         expand_context: str | None = None,
+        tenant_id: str | None = None,
+        scope_id: str | None = None,
+        include_global: bool | None = None,
+        allowed_categories: Sequence[str] | None = None,
     ) -> list[SearchResult]:
         query_vector: list[float] | None = None
         if self.provider:
@@ -431,6 +499,14 @@ class AsyncRetrievalEngine:
             "p_fts_config": fts_config,
             "p_min_vector_similarity": min_vector_similarity,
         }
+        if tenant_id is not None:
+            params["p_tenant_id"] = tenant_id
+        if scope_id is not None:
+            params["p_scope_id"] = scope_id
+        if include_global is not None:
+            params["p_include_global"] = include_global
+        if allowed_categories is not None:
+            params["p_allowed_categories"] = list(allowed_categories)
 
         if use_rls or kb_token is None:
             data = await self._rpc("search_chunks_hybrid_rls", params)

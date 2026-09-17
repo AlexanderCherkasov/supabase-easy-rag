@@ -55,75 +55,89 @@ def fetch_tydiqa_corpus(
     offset = 0
     batch_size = 100
 
-    while True:
+    total_expected = 5077
+    max_retries = 10
+
+    while offset < total_expected:
         url = f"https://datasets-server.huggingface.co/rows?dataset=google-research-datasets%2Ftydiqa&config=secondary_task&split={split}&offset={offset}&limit={batch_size}"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Supabase-Easy-RAG-Eval)"})
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                rows = data.get("rows", [])
-                if not rows:
+        
+        rows = None
+        for attempt in range(max_retries):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    rows = data.get("rows", [])
                     break
-                for row_wrapper in rows:
-                    row = row_wrapper.get("row", {})
-                    row_id = str(row.get("id", ""))
-                    title = row.get("title", "Untitled Passage").strip()
-                    context = row.get("context", "").strip()
-                    question = row.get("question", "").strip()
-                    answers = row.get("answers", {})
-
-                    if not context or not question:
-                        continue
-
-                    lang = extract_language_from_id(row_id)
-                    fts_cfg = get_fts_config_for_language(lang)
-
-                    # Deduplicate contexts so multiple QA pairs can map to the same document
-                    ctx_key = f"{lang}:{context.strip()}"
-                    ctx_hash = hash(ctx_key)
-
-                    if ctx_hash in context_to_filename:
-                        filename, doc_title, doc_lang = context_to_filename[ctx_hash]
-                    else:
-                        idx = len(files) + 1
-                        filename = f"tydi_{idx:05d}.md"
-                        file_path = doc_dir / filename
-
-                        # Construct markdown document with language & FTS metadata
-                        md_content = (
-                            f"# {title}\n\n"
-                            f"## Metadata\n"
-                            f"- **Language**: {lang}\n"
-                            f"- **FTS Config**: {fts_cfg}\n\n"
-                            f"## Overview\n"
-                            f"{context}\n"
-                        )
-                        file_path.write_text(md_content, encoding="utf-8")
-                        files.append(file_path)
-                        context_to_filename[ctx_hash] = (filename, title, lang)
-
-                    # Extract gold answer spans
-                    ans_texts = answers.get("text", []) if isinstance(answers, dict) else []
-
-                    qa_items.append({
-                        "id": f"tydi_full_{len(qa_items) + 1:05d}",
-                        "question": question,
-                        "expected_document_key": filename,
-                        "document_title": title,
-                        "language": lang,
-                        "gold_answers": ans_texts,
-                        "mode": "hybrid",
-                    })
-
-                    if limit is not None and len(files) >= limit:
-                        break
-
-                offset += batch_size
-                print(f"  Processed {offset} rows | {len(files)} docs | {len(qa_items)} QA items ...")
-                if limit is not None and len(files) >= limit:
+            except Exception as exc:
+                if attempt < max_retries - 1:
+                    wait_sec = 2 ** attempt
+                    print(f"  [Retry {attempt+1}/{max_retries}] Offset {offset} error ({exc}), waiting {wait_sec}s...")
+                    time.sleep(wait_sec)
+                else:
+                    print(f"  Failed offset {offset} after {max_retries} attempts: {exc}")
                     break
-        except Exception as exc:
-            print(f"  Warning during fetch at offset {offset}: {exc}")
+
+        if not rows:
+            break
+
+        for row_wrapper in rows:
+            row = row_wrapper.get("row", {})
+            row_id = str(row.get("id", ""))
+            title = row.get("title", "Untitled Passage").strip()
+            context = row.get("context", "").strip()
+            question = row.get("question", "").strip()
+            answers = row.get("answers", {})
+
+            if not context or not question:
+                continue
+
+            lang = extract_language_from_id(row_id)
+            fts_cfg = get_fts_config_for_language(lang)
+
+            # Deduplicate contexts so multiple QA pairs can map to the same document
+            ctx_key = f"{lang}:{context.strip()}"
+            ctx_hash = hash(ctx_key)
+
+            if ctx_hash in context_to_filename:
+                filename, doc_title, doc_lang = context_to_filename[ctx_hash]
+            else:
+                idx = len(files) + 1
+                filename = f"tydi_{idx:05d}.md"
+                file_path = doc_dir / filename
+
+                # Construct markdown document with language & FTS metadata
+                md_content = (
+                    f"# {title}\n\n"
+                    f"## Metadata\n"
+                    f"- **Language**: {lang}\n"
+                    f"- **FTS Config**: {fts_cfg}\n\n"
+                    f"## Overview\n"
+                    f"{context}\n"
+                )
+                file_path.write_text(md_content, encoding="utf-8")
+                files.append(file_path)
+                context_to_filename[ctx_hash] = (filename, title, lang)
+
+            # Extract gold answer spans
+            ans_texts = answers.get("text", []) if isinstance(answers, dict) else []
+
+            qa_items.append({
+                "id": f"tydi_full_{len(qa_items) + 1:05d}",
+                "question": question,
+                "expected_document_key": filename,
+                "document_title": title,
+                "language": lang,
+                "gold_answers": ans_texts,
+                "mode": "hybrid",
+            })
+
+            if limit is not None and len(files) >= limit:
+                break
+
+        offset += batch_size
+        print(f"  Processed {offset}/{total_expected} rows | {len(files)} docs | {len(qa_items)} QA items ...")
+        if limit is not None and len(files) >= limit:
             break
 
     dataset_file = dest_dir / "tydiqa_full_dataset.json"

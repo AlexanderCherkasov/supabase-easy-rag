@@ -18,21 +18,37 @@ BEGIN
 END;
 $$;
 
--- 2. Create auth schema & users table (built-in on Supabase)
-CREATE SCHEMA IF NOT EXISTS auth;
-CREATE TABLE IF NOT EXISTS auth.users (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    email TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
+-- 2. Create auth schema & users table if not already present
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'auth' AND table_name = 'users') THEN
+        CREATE SCHEMA IF NOT EXISTS auth;
+        CREATE TABLE IF NOT EXISTS auth.users (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            email TEXT,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+    END IF;
+END;
+$$;
 
--- 3. Create standard auth.uid() function (built-in on Supabase)
-CREATE OR REPLACE FUNCTION auth.uid()
-RETURNS UUID
-LANGUAGE sql STABLE
-AS $$
-    SELECT COALESCE(
-        nullif(current_setting('request.jwt.claim.sub', true), ''),
-        (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
-    )::uuid;
+-- 3. Create standard auth.uid() function if not already present
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_proc p
+        JOIN pg_namespace n ON p.pronamespace = n.oid
+        WHERE n.nspname = 'auth' AND p.proname = 'uid'
+    ) THEN
+        CREATE OR REPLACE FUNCTION auth.uid()
+        RETURNS UUID
+        LANGUAGE sql STABLE
+        AS $func$
+            SELECT COALESCE(
+                nullif(current_setting('request.jwt.claim.sub', true), ''),
+                (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
+            )::uuid;
+        $func$;
+    END IF;
+END;
 $$;

@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS knowledgebase.documents (
     title TEXT NOT NULL,
     top_level_category TEXT,
     owner_id UUID REFERENCES auth.users(id) ON DELETE SET NULL DEFAULT auth.uid(),
+    tenant_id UUID,
+    scope_id UUID,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     checksum TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -102,6 +104,8 @@ CREATE TABLE IF NOT EXISTS knowledgebase.ingestion_runs (
     source_root TEXT NOT NULL,
     files_seen INT NOT NULL DEFAULT 0,
     files_changed INT NOT NULL DEFAULT 0,
+    tenant_id UUID,
+    user_id UUID DEFAULT auth.uid(),
     error_summary TEXT,
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
@@ -207,6 +211,8 @@ $$ LANGUAGE plpgsql;
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_kb_documents_owner ON knowledgebase.documents(owner_id);
+CREATE INDEX IF NOT EXISTS idx_kb_documents_tenant_scope ON knowledgebase.documents(tenant_id, scope_id);
+CREATE INDEX IF NOT EXISTS idx_kb_ingestion_tenant_user ON knowledgebase.ingestion_runs(tenant_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_kb_doc_owners_doc ON knowledgebase.document_owners(document_id);
 CREATE INDEX IF NOT EXISTS idx_kb_doc_owners_owner ON knowledgebase.document_owners(owner_id);
 CREATE INDEX IF NOT EXISTS idx_kb_sections_doc_id ON knowledgebase.document_sections(document_id);
@@ -243,7 +249,7 @@ CREATE TRIGGER update_kb_tokens_updated_at BEFORE UPDATE ON knowledgebase.access
 -- Triggers for Weighted FTS Search Vector
 DROP TRIGGER IF EXISTS trigger_kb_chunks_search_vector ON knowledgebase.chunks;
 CREATE TRIGGER trigger_kb_chunks_search_vector
-BEFORE INSERT OR UPDATE OF document_id, section_id, content, metadata
+BEFORE INSERT OR UPDATE
 ON knowledgebase.chunks
 FOR EACH ROW EXECUTE FUNCTION knowledgebase.chunks_search_vector_trigger();
 
@@ -282,123 +288,348 @@ GRANT USAGE ON SCHEMA knowledgebase TO anon;
 GRANT ALL ON ALL TABLES IN SCHEMA knowledgebase TO service_role;
 GRANT ALL ON ALL SEQUENCES IN SCHEMA knowledgebase TO service_role;
 
--- Grants: authenticated can SELECT via RLS; anon gets nothing by default
+-- Grants: authenticated gets access to documents, sections, chunks, facets & ingestion runs via RLS
 REVOKE ALL ON ALL TABLES IN SCHEMA knowledgebase FROM anon;
 REVOKE ALL ON ALL TABLES IN SCHEMA knowledgebase FROM authenticated;
-GRANT SELECT ON knowledgebase.documents TO authenticated;
-GRANT SELECT ON knowledgebase.document_owners TO authenticated;
-GRANT SELECT ON knowledgebase.document_sections TO authenticated;
-GRANT SELECT ON knowledgebase.chunks TO authenticated;
-GRANT SELECT ON knowledgebase.facets TO authenticated;
-GRANT SELECT ON knowledgebase.document_facets TO authenticated;
--- authenticated can also read facets/navigation without ownership check
-GRANT SELECT ON knowledgebase.facets TO anon;
 
--- Helper: check if current user owns document (single-owner + multi-owner + public fallback)
--- Public documents: owner_id IS NULL and no entry in document_owners => visible to all authenticated
+GRANT SELECT, INSERT, UPDATE, DELETE ON knowledgebase.documents TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON knowledgebase.document_owners TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON knowledgebase.document_sections TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON knowledgebase.chunks TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON knowledgebase.document_facets TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON knowledgebase.ingestion_runs TO authenticated;
+GRANT SELECT ON knowledgebase.facets TO authenticated, anon;
 
--- Policy: documents - users can read own docs + public docs + shared via document_owners
+-- Helper Functions for Fine-Grained Access & Multitenancy Integration
+CREATE OR REPLACE FUNCTION knowledgebase.can_read_document(p_doc_id UUID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions, knowledgebase
+AS $$
+DECLARE
+    v_doc RECORD;
+    v_role TEXT;
+    v_user_id UUID;
+    v_has_access BOOLEAN;
+BEGIN
+    v_role := COALESCE(current_setting('request.jwt.claim.role', true), 'anon');
+    IF v_role = 'service_role' THEN
+        RETURN TRUE;
+    END IF;
+
+    v_user_id := auth.uid();
+
+    SELECT id, tenant_id, scope_id, owner_id, top_level_category
+    INTO v_doc
+    FROM knowledgebase.documents
+    WHERE id = p_doc_id;
+
+    IF NOT FOUND THEN
+        RETURN FALSE;
+    END IF;
+
+    -- System Category Isolation:
+    -- System documents are restricted to service_role, explicit system claim, or RBAC permission.
+    IF v_doc.top_level_category = 'system' THEN
+        IF (auth.jwt() -> 'app_metadata' ->> 'is_system_agent')::boolean IS TRUE THEN
+            RETURN TRUE;
+        END IF;
+        IF to_regproc('api.has_permission') IS NOT NULL AND v_doc.tenant_id IS NOT NULL THEN
+            BEGIN
+                EXECUTE 'SELECT api.has_permission($1, $2)'
+                INTO v_has_access
+                USING v_doc.tenant_id, 'knowledgebase.system.read';
+                IF v_has_access IS TRUE THEN
+                    RETURN TRUE;
+                END IF;
+            EXCEPTION WHEN OTHERS THEN
+                NULL;
+            END;
+        END IF;
+        RETURN FALSE;
+    END IF;
+
+    -- Global Scope (tenant_id IS NULL):
+    IF v_doc.tenant_id IS NULL THEN
+        RETURN (
+            v_doc.owner_id IS NULL
+            OR v_doc.owner_id = v_user_id
+            OR EXISTS (
+                SELECT 1 FROM knowledgebase.document_owners do2
+                WHERE do2.document_id = v_doc.id AND do2.owner_id = v_user_id
+            )
+        );
+    END IF;
+
+    -- Tenant Scope with supabase-multitenancy:
+    IF to_regproc('api.access_level') IS NOT NULL THEN
+        BEGIN
+            EXECUTE 'SELECT api.access_level($1, $2, ARRAY[$3])'
+            INTO v_role
+            USING v_doc.tenant_id, 'knowledgebase.read', v_doc.scope_id;
+
+            IF v_role = 'all' THEN
+                RETURN TRUE;
+            ELSIF v_role = 'own' THEN
+                RETURN (v_doc.owner_id = v_user_id);
+            ELSE
+                RETURN FALSE;
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END;
+    END IF;
+
+    -- Fallback when supabase-multitenancy is not installed
+    RETURN (
+        v_doc.owner_id IS NULL
+        OR v_doc.owner_id = v_user_id
+        OR EXISTS (
+            SELECT 1 FROM knowledgebase.document_owners do2
+            WHERE do2.document_id = v_doc.id AND do2.owner_id = v_user_id
+        )
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION knowledgebase.can_write_document(p_doc_id UUID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions, knowledgebase
+AS $$
+DECLARE
+    v_doc RECORD;
+    v_role TEXT;
+    v_user_id UUID;
+    v_level TEXT;
+BEGIN
+    v_role := COALESCE(current_setting('request.jwt.claim.role', true), 'anon');
+    IF v_role = 'service_role' THEN
+        RETURN TRUE;
+    END IF;
+
+    v_user_id := auth.uid();
+    IF v_user_id IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    SELECT id, tenant_id, scope_id, owner_id, top_level_category
+    INTO v_doc
+    FROM knowledgebase.documents
+    WHERE id = p_doc_id;
+
+    IF NOT FOUND THEN
+        RETURN FALSE;
+    END IF;
+
+    -- Regular users cannot modify system category or global documents
+    IF v_doc.top_level_category = 'system' OR v_doc.tenant_id IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    -- Tenant Scope with supabase-multitenancy
+    IF to_regproc('api.access_level') IS NOT NULL THEN
+        BEGIN
+            EXECUTE 'SELECT api.access_level($1, $2, ARRAY[$3])'
+            INTO v_level
+            USING v_doc.tenant_id, 'knowledgebase.ingest', v_doc.scope_id;
+
+            IF v_level = 'all' THEN
+                RETURN TRUE;
+            ELSIF v_level = 'own' THEN
+                RETURN (v_doc.owner_id = v_user_id);
+            ELSE
+                RETURN FALSE;
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END;
+    END IF;
+
+    -- Fallback when supabase-multitenancy is not installed
+    RETURN (
+        v_doc.owner_id = v_user_id
+        OR EXISTS (
+            SELECT 1 FROM knowledgebase.document_owners do2
+            WHERE do2.document_id = v_doc.id AND do2.owner_id = v_user_id
+        )
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION knowledgebase.can_insert_document(
+    p_tenant_id UUID,
+    p_scope_id UUID,
+    p_owner_id UUID,
+    p_top_level_category TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions, knowledgebase
+AS $$
+DECLARE
+    v_role TEXT;
+    v_user_id UUID;
+    v_level TEXT;
+BEGIN
+    v_role := COALESCE(current_setting('request.jwt.claim.role', true), 'anon');
+    IF v_role = 'service_role' THEN
+        RETURN TRUE;
+    END IF;
+
+    IF p_top_level_category = 'system' THEN
+        RETURN FALSE;
+    END IF;
+
+    v_user_id := auth.uid();
+    IF v_user_id IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+    IF p_tenant_id IS NOT NULL THEN
+        IF to_regproc('api.access_level') IS NOT NULL THEN
+            BEGIN
+                EXECUTE 'SELECT api.access_level($1, $2, ARRAY[$3])'
+                INTO v_level
+                USING p_tenant_id, 'knowledgebase.ingest', p_scope_id;
+
+                IF v_level = 'all' THEN
+                    RETURN TRUE;
+                ELSIF v_level = 'own' THEN
+                    RETURN (p_owner_id = v_user_id OR p_owner_id IS NULL);
+                ELSE
+                    RETURN FALSE;
+                END IF;
+            EXCEPTION WHEN OTHERS THEN
+                NULL;
+            END;
+        END IF;
+        RETURN (p_owner_id = v_user_id OR p_owner_id IS NULL);
+    ELSE
+        RETURN (p_owner_id = v_user_id);
+    END IF;
+END;
+$$;
+
+-- Policy: documents
 DROP POLICY IF EXISTS "Users can query their own documents" ON knowledgebase.documents;
-CREATE POLICY "Users can query their own documents"
+DROP POLICY IF EXISTS "documents_select_scoped" ON knowledgebase.documents;
+CREATE POLICY "documents_select_scoped"
 ON knowledgebase.documents FOR SELECT TO authenticated USING (
-  owner_id IS NULL
-  OR owner_id = auth.uid()
-  OR EXISTS (
-    SELECT 1 FROM knowledgebase.document_owners do2
-    WHERE do2.document_id = documents.id AND do2.owner_id = auth.uid()
-  )
+    knowledgebase.can_read_document(id)
 );
 
 DROP POLICY IF EXISTS "Users can insert their own documents" ON knowledgebase.documents;
-CREATE POLICY "Users can insert their own documents"
+DROP POLICY IF EXISTS "documents_insert_scoped" ON knowledgebase.documents;
+CREATE POLICY "documents_insert_scoped"
 ON knowledgebase.documents FOR INSERT TO authenticated WITH CHECK (
-  owner_id = auth.uid() OR owner_id IS NULL
+    knowledgebase.can_insert_document(tenant_id, scope_id, owner_id, top_level_category)
 );
 
 DROP POLICY IF EXISTS "Users can update their own documents" ON knowledgebase.documents;
-CREATE POLICY "Users can update their own documents"
-ON knowledgebase.documents FOR UPDATE TO authenticated USING (
-  owner_id = auth.uid() OR EXISTS (
-    SELECT 1 FROM knowledgebase.document_owners do2
-    WHERE do2.document_id = documents.id AND do2.owner_id = auth.uid()
-  )
-);
+DROP POLICY IF EXISTS "documents_update_scoped" ON knowledgebase.documents;
+CREATE POLICY "documents_update_scoped"
+ON knowledgebase.documents FOR UPDATE TO authenticated
+USING (knowledgebase.can_write_document(id))
+WITH CHECK (knowledgebase.can_write_document(id));
 
 DROP POLICY IF EXISTS "Users can delete their own documents" ON knowledgebase.documents;
-CREATE POLICY "Users can delete their own documents"
-ON knowledgebase.documents FOR DELETE TO authenticated USING (
-  owner_id = auth.uid() OR EXISTS (
-    SELECT 1 FROM knowledgebase.document_owners do2
-    WHERE do2.document_id = documents.id AND do2.owner_id = auth.uid()
-  )
-);
+DROP POLICY IF EXISTS "documents_delete_scoped" ON knowledgebase.documents;
+CREATE POLICY "documents_delete_scoped"
+ON knowledgebase.documents FOR DELETE TO authenticated
+USING (knowledgebase.can_write_document(id));
 
--- Policy: document_owners - user can see ownership rows for docs they are member of
+-- Policy: document_owners
 DROP POLICY IF EXISTS "Users can query document_owners" ON knowledgebase.document_owners;
 CREATE POLICY "Users can query document_owners"
 ON knowledgebase.document_owners FOR SELECT TO authenticated USING (
-  owner_id = auth.uid()
+    owner_id = auth.uid()
 );
 
--- Policy: chunks / document_sections - restrict via linked document ownership (core RAG pattern)
--- This mirrors the Supabase guide: document_sections filtered via documents.owner_id
+-- Policy: document_sections
 DROP POLICY IF EXISTS "Users can query their own document sections" ON knowledgebase.document_sections;
-CREATE POLICY "Users can query their own document sections"
-ON knowledgebase.document_sections FOR SELECT TO authenticated USING (
-  document_id IN (
-    SELECT id FROM knowledgebase.documents
-    WHERE owner_id IS NULL
-       OR owner_id = auth.uid()
-       OR EXISTS (
-         SELECT 1 FROM knowledgebase.document_owners do2
-         WHERE do2.document_id = documents.id AND do2.owner_id = auth.uid()
-       )
-  )
-);
+DROP POLICY IF EXISTS "document_sections_select_scoped" ON knowledgebase.document_sections;
+CREATE POLICY "document_sections_select_scoped"
+ON knowledgebase.document_sections FOR SELECT TO authenticated
+USING (knowledgebase.can_read_document(document_id));
 
+DROP POLICY IF EXISTS "document_sections_insert_scoped" ON knowledgebase.document_sections;
+CREATE POLICY "document_sections_insert_scoped"
+ON knowledgebase.document_sections FOR INSERT TO authenticated
+WITH CHECK (knowledgebase.can_write_document(document_id));
+
+DROP POLICY IF EXISTS "document_sections_update_scoped" ON knowledgebase.document_sections;
+CREATE POLICY "document_sections_update_scoped"
+ON knowledgebase.document_sections FOR UPDATE TO authenticated
+USING (knowledgebase.can_write_document(document_id))
+WITH CHECK (knowledgebase.can_write_document(document_id));
+
+DROP POLICY IF EXISTS "document_sections_delete_scoped" ON knowledgebase.document_sections;
+CREATE POLICY "document_sections_delete_scoped"
+ON knowledgebase.document_sections FOR DELETE TO authenticated
+USING (knowledgebase.can_write_document(document_id));
+
+-- Policy: chunks
 DROP POLICY IF EXISTS "Users can query their own chunks" ON knowledgebase.chunks;
-CREATE POLICY "Users can query their own chunks"
-ON knowledgebase.chunks FOR SELECT TO authenticated USING (
-  document_id IN (
-    SELECT id FROM knowledgebase.documents
-    WHERE owner_id IS NULL
-       OR owner_id = auth.uid()
-       OR EXISTS (
-         SELECT 1 FROM knowledgebase.document_owners do2
-         WHERE do2.document_id = documents.id AND do2.owner_id = auth.uid()
-       )
-  )
-);
+DROP POLICY IF EXISTS "chunks_select_scoped" ON knowledgebase.chunks;
+CREATE POLICY "chunks_select_scoped"
+ON knowledgebase.chunks FOR SELECT TO authenticated
+USING (knowledgebase.can_read_document(document_id));
 
--- Optional: Alternative policy for external user source via FDW or custom JWT claim
--- Uncomment if you use direct Postgres connection with app.current_user_id:
--- CREATE POLICY "Users can query via app.current_user_id"
--- ON knowledgebase.chunks FOR SELECT TO authenticated USING (
---   document_id IN (
---     SELECT id FROM knowledgebase.documents
---     WHERE owner_id::text = current_setting('app.current_user_id', true)
---   )
--- );
+DROP POLICY IF EXISTS "chunks_insert_scoped" ON knowledgebase.chunks;
+CREATE POLICY "chunks_insert_scoped"
+ON knowledgebase.chunks FOR INSERT TO authenticated
+WITH CHECK (knowledgebase.can_write_document(document_id));
 
--- Facets: public read (no ownership), restrict writes to service_role (no policy for authenticated insert)
+DROP POLICY IF EXISTS "chunks_update_scoped" ON knowledgebase.chunks;
+CREATE POLICY "chunks_update_scoped"
+ON knowledgebase.chunks FOR UPDATE TO authenticated
+USING (knowledgebase.can_write_document(document_id))
+WITH CHECK (knowledgebase.can_write_document(document_id));
+
+DROP POLICY IF EXISTS "chunks_delete_scoped" ON knowledgebase.chunks;
+CREATE POLICY "chunks_delete_scoped"
+ON knowledgebase.chunks FOR DELETE TO authenticated
+USING (knowledgebase.can_write_document(document_id));
+
+-- Facets: public read
 DROP POLICY IF EXISTS "Anyone can read facets" ON knowledgebase.facets;
 CREATE POLICY "Anyone can read facets"
 ON knowledgebase.facets FOR SELECT TO authenticated, anon USING (true);
 
--- Document facets: restricted via linked document ownership (prevents metadata leakage)
+-- Document Facets: restricted via document access
 DROP POLICY IF EXISTS "Users can query their own document facets" ON knowledgebase.document_facets;
-CREATE POLICY "Users can query their own document facets"
-ON knowledgebase.document_facets FOR SELECT TO authenticated USING (
-  document_id IN (
-    SELECT id FROM knowledgebase.documents
-    WHERE owner_id IS NULL
-       OR owner_id = auth.uid()
-       OR EXISTS (
-         SELECT 1 FROM knowledgebase.document_owners do2
-         WHERE do2.document_id = documents.id AND do2.owner_id = auth.uid()
-       )
-  )
-);
+DROP POLICY IF EXISTS "document_facets_select_scoped" ON knowledgebase.document_facets;
+CREATE POLICY "document_facets_select_scoped"
+ON knowledgebase.document_facets FOR SELECT TO authenticated
+USING (knowledgebase.can_read_document(document_id));
 
--- Ingestion / tokens / audit: service_role only (no authenticated policies => no access)
--- Intentionally no policies for authenticated on these tables.
+DROP POLICY IF EXISTS "document_facets_insert_scoped" ON knowledgebase.document_facets;
+CREATE POLICY "document_facets_insert_scoped"
+ON knowledgebase.document_facets FOR INSERT TO authenticated
+WITH CHECK (knowledgebase.can_write_document(document_id));
+
+DROP POLICY IF EXISTS "document_facets_update_scoped" ON knowledgebase.document_facets;
+CREATE POLICY "document_facets_update_scoped"
+ON knowledgebase.document_facets FOR UPDATE TO authenticated
+USING (knowledgebase.can_write_document(document_id))
+WITH CHECK (knowledgebase.can_write_document(document_id));
+
+DROP POLICY IF EXISTS "document_facets_delete_scoped" ON knowledgebase.document_facets;
+CREATE POLICY "document_facets_delete_scoped"
+ON knowledgebase.document_facets FOR DELETE TO authenticated
+USING (knowledgebase.can_write_document(document_id));
+
+-- Ingestion Runs: authenticated users manage their own runs
+DROP POLICY IF EXISTS "ingestion_runs_scoped" ON knowledgebase.ingestion_runs;
+CREATE POLICY "ingestion_runs_scoped"
+ON knowledgebase.ingestion_runs FOR ALL TO authenticated
+USING (user_id = auth.uid() OR user_id IS NULL)
+WITH CHECK (user_id = auth.uid() OR user_id IS NULL);
+
